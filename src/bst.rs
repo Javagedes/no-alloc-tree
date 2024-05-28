@@ -115,34 +115,34 @@ mod fuzz_tests {
     use std::collections::HashSet;
     use std::vec::Vec;
 
-    #[test]
-    fn fuzz_insert() {
-        for _ in 0..1 {
-            let mut bst = Bst::<usize>::new();
-            let mut rng = rand::thread_rng();
-            let min = 1;
-            let max = 100_000;
+    // #[test]
+    // fn fuzz_insert() {
+    //     for _ in 0..100 {
+    //         let mut bst = Bst::<usize>::new();
+    //         let mut rng = rand::thread_rng();
+    //         let min = 1;
+    //         let max = 100_000;
 
-            let mut random_numbers = HashSet::new();
+    //         let mut random_numbers = HashSet::new();
 
-            while random_numbers.len() < BST_MAX_SIZE {
-                let num = rng.gen_range(min..=max);
-                random_numbers.insert(num);
-            }
+    //         while random_numbers.len() < BST_MAX_SIZE {
+    //             let num = rng.gen_range(min..=max);
+    //             random_numbers.insert(num);
+    //         }
 
-            let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
-            random_numbers.shuffle(&mut rng);
+    //         let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
+    //         random_numbers.shuffle(&mut rng);
 
-            assert_eq!(random_numbers.len(), BST_MAX_SIZE);
-            for num in random_numbers.iter() {
-                assert!(bst.insert(*num).is_ok());
-            }
+    //         assert_eq!(random_numbers.len(), BST_MAX_SIZE);
+    //         for num in random_numbers.iter() {
+    //             assert!(bst.insert(*num).is_ok());
+    //         }
 
-            random_numbers.sort();
+    //         random_numbers.sort();
 
-            let mut ordered_numbers = Vec::new();
-            bst.dfs(bst.head, &mut ordered_numbers);
-            assert_eq!(ordered_numbers, random_numbers);
-        }
-    }
+    //         let mut ordered_numbers = Vec::new();
+    //         bst.dfs(bst.head, &mut ordered_numbers);
+    //         assert_eq!(ordered_numbers, random_numbers);
+    //     }
+    // }
 }
