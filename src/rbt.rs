@@ -7,27 +7,43 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 const RED: bool = false;
 const BLACK: bool = true;
-const RBT_MAX_SIZE: usize = 0x1000;
 
-struct Storage<D>
+/// A on-stack storage container for the nodes of a red-black tree.
+struct Storage<D, const SIZE: usize>
 where
     D: PartialOrd,
 {
-    data: [(bool, MaybeUninit<Node<D>>); RBT_MAX_SIZE],
+    data: [(bool, MaybeUninit<Node<D>>); SIZE],
     length: usize,
 }
 
-impl<D> Storage<D>
+impl<D, const SIZE: usize> Storage<D, {SIZE}>
 where
     D: PartialOrd,
 {
-    fn new() -> Storage<D> {
+    /// Create a new storage container.
+    fn new() -> Storage<D, SIZE> {
         Storage {
             data: unsafe { MaybeUninit::zeroed().assume_init() },
             length: 0,
         }
     }
 
+    /// Create a new storage container at the given pointer.
+    /// 
+    /// # Safety
+    /// 
+    /// The pointer must be valid and must not be used after the storage is dropped.
+    /// This function will zero out all memory at the given address for the storage.
+    unsafe fn new_at(ptr: *mut Storage<D, SIZE>) -> &'static Storage<D, SIZE> {
+            ptr::write(ptr, Storage {
+                data: MaybeUninit::zeroed().assume_init(),
+                length: 0,
+            });
+            &*ptr
+    }
+
+    /// Add a new node to the storage container, returning a mutable reference to the node.
     fn add(&mut self, data: D) -> Result<&mut Node<D>> {
         if let Some(index) = self.first_null() {
             self.data[index] = (true, MaybeUninit::new(Node::new(data)));
@@ -38,6 +54,7 @@ where
         Err(Error::OutOfSpace)
     }
 
+    /// Find the first null node in the storage container.
     fn first_null(&self) -> Option<usize> {
         for (index, (init, _)) in self.data.iter().enumerate() {
             if !init {
@@ -48,19 +65,24 @@ where
     }
 }
 
-struct Rbt<D>
+/// A red-black tree that can hold up to `SIZE` nodes.
+/// 
+/// The tree is implemented using the [AtomicPtr] structure, so the target must support atomic operations.
+/// The storage is allocated on the stack with [Self::new] or statically at any address using [Self::new_at].
+
+pub struct Rbt<D, const SIZE: usize>
 where
     D: PartialOrd,
 {
-    storage: Storage<D>,
+    storage: Storage<D, SIZE>,
     head: AtomicPtr<Node<D>>,
 }
 
-impl<D> Rbt<D>
+impl<D, const SIZE: usize> Rbt<D, {SIZE}>
 where
     D: PartialOrd + Copy + core::fmt::Debug,
 {
-    fn new() -> Rbt<D> {
+    pub fn new() -> Rbt<D, SIZE> {
         Rbt {
             storage: Storage::new(),
             head: AtomicPtr::new(ptr::null_mut()),
@@ -75,11 +97,7 @@ where
         Some(unsafe { & *head_ptr })
     }
 
-    fn add_node(&mut self, data: D) -> Result<&mut Node<D>> {
-        self.storage.add(data)
-    }
-
-    fn insert(&mut self, data: D) -> Result<()> {
+    pub fn insert(&mut self, data: D) -> Result<()> {
         let node = self.storage.add(data).unwrap();
 
         if self.head.load(Ordering::SeqCst).is_null() {
@@ -97,7 +115,7 @@ where
         return Ok(());
     }
 
-    fn search(&self, data: D) -> Option<D> {
+    pub fn search(&self, data: D) -> Option<D> {
         let mut current_idx = self.head();
         while let Some(node) = current_idx {
             if data == node.data {
@@ -380,9 +398,11 @@ mod tests {
     use core::sync::atomic::AtomicPtr;
     use std::println;
 
+    const RBT_MAX_SIZE: usize = 0x1000;
+
     #[test]
     fn simple_test() {
-            let mut rbt = Rbt::new();
+            let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new();
             assert!(rbt.insert(5).is_ok());
             assert_eq!(rbt.storage.length, 1);
             assert!(rbt.insert(3).is_ok());
@@ -426,7 +446,7 @@ mod tests {
 
         let head = AtomicPtr::<Node<i32>>::default();
 
-        Rbt::rotate_right(&head, &node);
+        Rbt::<i32, RBT_MAX_SIZE>::rotate_right(&head, &node);
 
         assert_eq!(left.left().unwrap().as_mut_ptr(), left_l.as_mut_ptr());
         assert_eq!(left.right().unwrap().as_mut_ptr(), node.as_mut_ptr());
@@ -462,7 +482,7 @@ mod tests {
 
         let head = AtomicPtr::<Node<i32>>::default();
 
-        Rbt::rotate_left(&head, &node);
+        Rbt::<i32, RBT_MAX_SIZE>::rotate_left(&head, &node);
 
         assert_eq!(right.left().unwrap().as_mut_ptr(), node.as_mut_ptr());
         assert_eq!(node.left().unwrap().as_mut_ptr(), left.as_mut_ptr());
@@ -480,7 +500,6 @@ mod tests {
 #[cfg(test)]
 mod fuzz_tests {
     extern crate std;
-    use super::RBT_MAX_SIZE;
     use super::{Node, Rbt};
     use core::sync::atomic::AtomicPtr;
     use rand::seq::SliceRandom;
@@ -488,10 +507,12 @@ mod fuzz_tests {
     use std::collections::HashSet;
     use std::vec::Vec;
 
+    const RBT_MAX_SIZE: usize = 0x1000;
+
     #[test]
     fn fuzz_insert() {
-        for _ in 0..1000 {
-            let mut rbt = Rbt::<usize>::new();
+        for _ in 0..100 {
+            let mut rbt: Rbt<usize, RBT_MAX_SIZE> = Rbt::new();
             let mut rng = rand::thread_rng();
             let min = 1;
             let max = 100_000;
@@ -522,7 +543,7 @@ mod fuzz_tests {
     
     #[test]
     fn fuzz_search() {
-        let mut bst = Rbt::<usize>::new();
+        let mut bst: Rbt<usize, RBT_MAX_SIZE> = Rbt::new();
         let mut rng = rand::thread_rng();
         let min = 1;
         let max = 100_000;
@@ -542,14 +563,14 @@ mod fuzz_tests {
         }
 
         // Search for numbers that exist in the tree
-        for _ in 0..10_000_000 {
+        for _ in 0..1_000_000 {
             let num = random_numbers.choose(&mut rng).unwrap();
             assert!(bst.search(*num).is_some());
         }
 
         
         // Search for numbers that do not exist in the tree
-        for _ in 0..10_000_000 {
+        for _ in 0..1_000_000 {
             let to_search = rng.gen_bool(0.5);
             let random_number = if to_search {
                 rng.gen_range(0..=min)

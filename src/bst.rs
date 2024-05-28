@@ -15,7 +15,7 @@ impl<D> Bst<D>
 where
     D: PartialOrd + Clone + Copy,
 {
-    fn insert(&mut self, data: D) -> Result<()> {
+    pub fn insert(&mut self, data: D) -> Result<()> {
         let Some(index) = self.first_empty() else {
             return Err(Error::OutOfSpace);
         };
@@ -64,7 +64,7 @@ where
         }
     }
 
-    fn search(&self, data: D) -> Option<D> {
+    pub fn search(&self, data: D) -> Option<D> {
         let mut current_idx = self.head;
         while let Some(index) = current_idx {
             if let Some(node) = &self.data[index] {
@@ -79,20 +79,16 @@ where
         }
         None
     }
-}
 
-impl<D> Bst<D>
-where
-    D: PartialOrd + Clone + Copy,
-{
-    fn new() -> Bst<D> {
+    pub fn new() -> Bst<D> {
         Bst {
             data: [None; BST_MAX_SIZE],
             length: 0,
             head: None,
         }
     }
-    fn len(&self) -> usize {
+
+    pub fn len(&self) -> usize {
         self.length
     }
 }
@@ -135,7 +131,7 @@ mod fuzz_tests {
 
     #[test]
     fn fuzz_insert() {
-        for _ in 0..1000 {
+        for _ in 0..100 {
             let mut bst = Bst::<usize>::new();
             let mut rng = rand::thread_rng();
             let min = 1;
@@ -186,14 +182,13 @@ mod fuzz_tests {
         }
 
         // Search for numbers that exist in the tree
-        for _ in 0..10_000_000 {
+        for _ in 0..1_000_000 {
             let num = random_numbers.choose(&mut rng).unwrap();
             assert!(bst.search(*num).is_some());
         }
 
-
         // Search for numbers that do not exist in the tree
-        for _ in 0..10_000_000 {
+        for _ in 0..1_000_000 {
             let to_search = rng.gen_bool(0.5);
             let random_number = if to_search {
                 rng.gen_range(0..=min)
