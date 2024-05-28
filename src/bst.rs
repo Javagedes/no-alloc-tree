@@ -191,9 +191,9 @@ mod fuzz_tests {
         for _ in 0..1_000_000 {
             let to_search = rng.gen_bool(0.5);
             let random_number = if to_search {
-                rng.gen_range(0..=min)
+                rng.gen_range(0..=min - 1)
             } else {
-                rng.gen_range(max..=max + 50_000)
+                rng.gen_range(max + 1..=max + 50_000)
             };
             assert!(bst.search(random_number).is_none());
         }

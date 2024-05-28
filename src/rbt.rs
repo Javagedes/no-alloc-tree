@@ -54,6 +54,14 @@ where
         Err(Error::OutOfSpace)
     }
 
+    /// Delete a node from the storage container.
+    fn delete(&mut self, ptr: *mut Node<D>) {
+        // Calculate the index of the node in the storage container based off the pointer.
+        let index = (ptr as usize - self.data.as_ptr() as usize) / core::mem::size_of::<(bool, MaybeUninit<Node<D>>)>();
+        self.data[index].0 = false;
+        self.length -= 1;
+    }
+
     /// Find the first null node in the storage container.
     fn first_null(&self) -> Option<usize> {
         for (index, (init, _)) in self.data.iter().enumerate() {
@@ -62,6 +70,10 @@ where
             }
         }
         None
+    }
+
+    fn len(&self) -> usize {
+        self.length
     }
 }
 
@@ -102,7 +114,7 @@ where
 
         if self.head.load(Ordering::SeqCst).is_null() {
             node.set_color(BLACK);
-            self.head.store(node.as_mut_ptr(), Ordering::SeqCst);
+            self.head.store(node, Ordering::SeqCst);
             return Ok(());
         }
 
@@ -129,6 +141,75 @@ where
         None
     }
 
+    pub fn delete(&mut self, data: D) -> Result<()> {
+        let Some(head) = self.head() else {
+            return Err(Error::NotFound);
+        };
+        let mut current = head;
+        loop {
+            if data == current.data {
+                break;
+            } else if data < current.data {
+                if let Some(left) = current.left() {
+                    current = left;
+                } else {
+                    return Err(Error::NotFound);
+                }
+            } else {
+                if let Some(right) = current.right() {
+                    current = right;
+                } else {
+                    return Err(Error::NotFound);
+                }
+            }
+        }
+        
+        let color = current.is_red();
+
+        if current.left().is_none() | current.right().is_none() {
+            Self::delete_simple(head, current);
+            self.storage.delete(current.as_mut_ptr());
+            return Ok(())
+        } else {
+            Self::delete_complex(current);
+        };
+
+        if color == BLACK {
+            todo!() // maybe? Self::fixup(&self.head, new_node.unwrap());
+        }
+
+        todo!()
+    }
+
+    // Deletes a node with 0 or 1 children.
+    fn delete_simple(head: &Node<D>, node: &Node<D>) {
+        let parent = match node.parent() {
+            Some(parent) => parent,
+            None => head,
+        };
+        if let Some(left) = node.left() {
+            left.set_parent(parent);
+            if parent.left_ptr() == node.as_mut_ptr() {
+                parent.set_left(left);
+            } else {
+                parent.set_right(left);
+            }
+        }
+        if let Some(right) = node.right() {
+            right.set_parent(node);
+            if parent.left_ptr() == node.as_mut_ptr() {
+                parent.set_left(right);
+            } else {
+                parent.set_right(right);
+            }
+        }
+    }
+
+    // Deletes a node with 2 children.
+    fn delete_complex(node: &Node<D>) {
+        todo!()
+    }
+
     fn insert_node(start: &Node<D>, node: &Node<D>) {
         let mut current = start;
         loop {
@@ -151,9 +232,9 @@ where
     }
 
     fn rotate_left(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
-        let right_child = node.right().unwrap();
+        let right_child = node.right().expect("Right Child should always exist when rotating.");
 
-        node.set_right_ptr(right_child.left_ptr());
+        node.set_right(right_child.left_ptr());
         if let Some(left) = right_child.left() {
             left.set_parent(node);
         }
@@ -164,9 +245,9 @@ where
         let parent = node.parent().unwrap();
         if Node::is_null(&node.parent) {
             head.store(node.parent.load(Ordering::SeqCst), Ordering::SeqCst);
-        } else if parent.left.load(Ordering::SeqCst) == node.as_mut_ptr() {
+        } else if parent.left_ptr() == node.as_mut_ptr() {
             parent.set_left(node);
-        } else if parent.right.load(Ordering::SeqCst) == node.as_mut_ptr() {
+        } else if parent.right_ptr() == node.as_mut_ptr() {
             parent.set_right(node);
         } else {
             panic!("Node is not a child of it's parents");
@@ -179,7 +260,7 @@ where
     fn rotate_right(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         let left_child = node.left().unwrap();
 
-        node.set_left(left_child.right().unwrap());
+        node.set_left(left_child.right_ptr());
         if let Some(right) = left_child.right() {
             right.set_parent(node);
         }
@@ -217,7 +298,7 @@ where
         let grandparent = parent.parent().expect("Parent is red, grandparent should exist");
         let uncle = Node::sibling(parent);
         
-        // Case 3: Uncle is red, recolor parent, grandparent, unclde
+        // Case 3: Uncle is red, recolor parent, grandparent, uncle
         if let Some(uncle) = uncle && uncle.is_red() {
             parent.set_color(BLACK);
             grandparent.set_color(RED);
@@ -301,6 +382,7 @@ where
     }
 
     #[inline(always)]
+    /// Used when you care whether or not the node is null.
     fn right(&self) -> Option<&Node<D>> {
         let node = self.right.load(Ordering::SeqCst);
         if node.is_null() {
@@ -308,18 +390,17 @@ where
         }
         Some(unsafe { & *node })
     }
+
+    /// Used when you don't care whether or not the node is null.
+    #[inline(always)]
     fn right_ptr(&self) -> *mut Node<D> {
         self.right.load(Ordering::SeqCst)
     }
 
     #[inline(always)]
-    fn set_right(&self, node: &Node<D>) {
-        //node.set_parent(self);
-        self.right.store(node.as_mut_ptr(), Ordering::SeqCst);
-    }
-
-    fn set_right_ptr(&self, node: *mut Node<D>) {
-        self.right.store(node, Ordering::SeqCst);
+    fn set_right<N: Into<*mut Node<D>>>(&self, node: N)
+    {
+        self.right.store(node.into(), Ordering::SeqCst);
     }
 
     #[inline(always)]
@@ -336,13 +417,9 @@ where
     }
 
     #[inline(always)]
-    fn set_left(&self, node: &Node<D>) {
-        //node.set_parent(self);
-        self.left.store(node.as_mut_ptr(), Ordering::SeqCst);
-    }
-
-    fn set_left_ptr(&self, node: *mut Node<D>) {
-        self.left.store(node, Ordering::SeqCst);
+    fn set_left<N: Into<*mut Node<D>>>(&self, node: N)
+    {
+        self.left.store(node.into(), Ordering::SeqCst);
     }
 
     fn parent(&self) -> Option<&Node<D>> {
@@ -353,8 +430,8 @@ where
         Some(unsafe { &*node })
     }
 
-    fn set_parent(&self, node: &Node<D>) {
-        self.parent.store(node.as_mut_ptr(), Ordering::SeqCst);
+    fn set_parent<N: Into<*mut Node<D>>>(&self, node: N) {
+        self.parent.store(node.into(), Ordering::SeqCst);
     }
 
     #[inline(always)]
@@ -368,26 +445,21 @@ where
     }
 
     fn sibling(node: &Node<D>) -> Option<&Node<D>> {
-        let Some(parent) = node.parent() else {
-            return None;
-        };
-
-        if node.as_mut_ptr() == parent.left.load(Ordering::SeqCst) {
-            return parent.right();
+        let parent = node.parent()?;
+        match node.as_mut_ptr() {
+            ptr if ptr == parent.left_ptr() => parent.right(),
+            ptr if ptr == parent.right_ptr() => parent.left(),
+            _ => panic!("Node is not a child of its parent."),
         }
-        if node.as_mut_ptr() == parent.right.load(Ordering::SeqCst) {
-            return parent.left();
-        }
-        panic!("Node is not a child of it's parent")
     }
 }
 
-impl<D> AsMut<D> for Node<D>
+impl <D>From<&Node<D>> for *mut Node<D>
 where
     D: PartialOrd,
 {
-    fn as_mut(&mut self) -> &mut D {
-        &mut self.data
+    fn from(node: &Node<D>) -> *mut Node<D> {
+        node.as_mut_ptr()
     }
 }
 
@@ -495,6 +567,36 @@ mod tests {
         assert!(right_l.left().is_none());
         assert!(right_l.right().is_none());
     }
+
+    #[test]
+    fn test_delete_from_storage() {
+        let mut rbt = Rbt::<i32, 10>::new();
+        rbt.insert(5).unwrap();
+        rbt.insert(3).unwrap();
+        assert_eq!(rbt.storage.len(), 2);
+        assert_eq!(rbt.storage.data.iter().filter(|(i, _)|{*i}).count(), 2);
+        rbt.delete(5).unwrap();
+        assert_eq!(rbt.storage.len(), 1);
+        assert_eq!(rbt.storage.data.iter().filter(|(i, _)|{*i}).count(), 1);
+        rbt.delete(3).unwrap();
+        assert_eq!(rbt.storage.len(), 0);
+        assert_eq!(rbt.storage.data.iter().filter(|(i, _)|{*i}).count(), 0);
+    }
+    #[test]
+    fn test_delete_simple() {
+        let node = Node::new(50);
+        let left = Node::new(10);
+        let left_l = Node::new(5);
+
+        node.set_left(&left);
+        left.set_parent(&node);
+        left.set_left(&left_l);
+        left_l.set_parent(&left);
+
+        Rbt::<i32, RBT_MAX_SIZE>::delete_simple(&node, &left);
+        assert_eq!(node.left().unwrap().as_mut_ptr(), left_l.as_mut_ptr());
+    }
+
 }
 
 #[cfg(test)]
@@ -540,6 +642,33 @@ mod fuzz_tests {
         }
     }
 
+    #[test]
+    fn fuzz_delete() {
+        let mut rbt: Rbt<usize, RBT_MAX_SIZE> = Rbt::new();
+        let mut rng = rand::thread_rng();
+        let min = 1;
+        let max = 100_000;
+
+        let mut random_numbers = HashSet::new();
+        while random_numbers.len() < RBT_MAX_SIZE {
+            let num = rng.gen_range(min..=max);
+            random_numbers.insert(num);
+        }
+
+        let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
+        random_numbers.shuffle(&mut rng);
+        
+        assert_eq!(random_numbers.len(), RBT_MAX_SIZE);
+        for num in random_numbers.iter() {
+            assert!(rbt.insert(*num).is_ok());
+        }
+
+        // Delete all the numbers
+        random_numbers.shuffle(&mut rng);
+        while let Some(num) = random_numbers.pop() {
+            assert!(rbt.delete(num).is_ok());
+        }
+    }
     
     #[test]
     fn fuzz_search() {
@@ -573,9 +702,9 @@ mod fuzz_tests {
         for _ in 0..1_000_000 {
             let to_search = rng.gen_bool(0.5);
             let random_number = if to_search {
-                rng.gen_range(0..=min)
+                rng.gen_range(0..=min - 1)
             } else {
-                rng.gen_range(max..=max + 50_000)
+                rng.gen_range(max + 1..=max + 50_000)
             };
             assert!(bst.search(random_number).is_none());
         }
