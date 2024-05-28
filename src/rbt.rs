@@ -67,12 +67,12 @@ where
         }
     }
 
-    fn head(&self) -> Option<&mut Node<D>> {
+    fn head(&self) -> Option<&Node<D>> {
         let head_ptr = self.head.load(Ordering::SeqCst);
         if head_ptr.is_null() {
             return None;
         }
-        Some(unsafe { &mut *head_ptr })
+        Some(unsafe { & *head_ptr })
     }
 
     fn add_node(&mut self, data: D) -> Result<&mut Node<D>> {
@@ -91,10 +91,24 @@ where
         let head = unsafe { &mut *self.head.load(Ordering::SeqCst) };
 
         Self::insert_node(head, node);
-        //Self::fixup(&self.head, node);
+        Self::fixup(&self.head, node);
         head.set_color(BLACK);
 
         return Ok(());
+    }
+
+    fn search(&self, data: D) -> Option<D> {
+        let mut current_idx = self.head();
+        while let Some(node) = current_idx {
+            if data == node.data {
+                return Some(node.data);
+            } else if data < node.data {
+                current_idx = node.left();
+            } else {
+                current_idx = node.right();
+            }
+        }
+        None
     }
 
     fn insert_node(start: &Node<D>, node: &Node<D>) {
@@ -121,7 +135,7 @@ where
     fn rotate_left(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         let right_child = node.right().unwrap();
 
-        node.set_right(right_child.left().unwrap());
+        node.set_right_ptr(right_child.left_ptr());
         if let Some(left) = right_child.left() {
             left.set_parent(node);
         }
@@ -170,10 +184,58 @@ where
     }
 
     fn fixup(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
-        todo!()
+        // Case 1: The node is the root of the tree, no fixups needed.
+        let Some(parent) = node.parent() else {
+            node.set_color(BLACK);
+            return;
+        };
+
+        // The parent is black, no fixups needed.
+        if parent.is_black() {
+            return;
+        }
+
+        // Case 2 is enforced by setting the parent to black. If the parent is red, the grandparent should exist.
+        let grandparent = parent.parent().expect("Parent is red, grandparent should exist");
+        let uncle = Node::sibling(parent);
+        
+        // Case 3: Uncle is red, recolor parent, grandparent, unclde
+        if let Some(uncle) = uncle && uncle.is_red() {
+            parent.set_color(BLACK);
+            grandparent.set_color(RED);
+            uncle.set_color(BLACK);
+
+            todo!(); // Move to grandparent and do this same logic again. Need a while loop
+        }
+
+        // Parent is left child of grandparent
+        else if parent.as_mut_ptr() == grandparent.left.load(Ordering::SeqCst) {
+            // Case 4a: uncle is black and node is left->right "inner child" of it's grandparent
+            if node.as_mut_ptr() == parent.right.load(Ordering::SeqCst) {
+                Self::rotate_left(head, parent);
+                grandparent.set_left(node);
+            }
+            // Case 5a: uncle is black and node is left->left "outer child" of it's grandparent
+            Self::rotate_right(head, grandparent); //todo, need updated parent??
+            node.set_color(BLACK);
+            grandparent.set_color(RED);
+        }
+        // Parent is right child of grandparent
+        else if parent.as_mut_ptr() == grandparent.right.load(Ordering::SeqCst) {
+            // Case 4b: unclde is black and node is right->left "inner child" of its grandparent
+            if node.as_mut_ptr() == parent.left.load(Ordering::SeqCst) {
+                Self::rotate_right(head, parent);
+                grandparent.set_right(node);
+            }
+            Self::rotate_left(head, grandparent);
+
+            node.set_color(BLACK);
+            grandparent.set_color(RED);
+        }
+        panic!("Parent is not a child of grandparent")
     }
 
-    fn dfs(&self, node: Option<&mut Node<D>>, values: &mut alloc::vec::Vec<D>) {
+    fn dfs(&self, node: Option<&Node<D>>, values: &mut alloc::vec::Vec<D>) {
         if let Some(node) = node {
             self.dfs(node.left(), values);
             values.push(node.data);
@@ -221,41 +283,56 @@ where
     }
 
     #[inline(always)]
-    fn right(&self) -> Option<&mut Node<D>> {
+    fn right(&self) -> Option<&Node<D>> {
         let node = self.right.load(Ordering::SeqCst);
         if node.is_null() {
             return None;
         }
-        Some(unsafe { &mut *node })
+        Some(unsafe { & *node })
+    }
+    fn right_ptr(&self) -> *mut Node<D> {
+        self.right.load(Ordering::SeqCst)
     }
 
     #[inline(always)]
     fn set_right(&self, node: &Node<D>) {
-        node.set_parent(self);
+        //node.set_parent(self);
         self.right.store(node.as_mut_ptr(), Ordering::SeqCst);
     }
 
+    fn set_right_ptr(&self, node: *mut Node<D>) {
+        self.right.store(node, Ordering::SeqCst);
+    }
+
     #[inline(always)]
-    fn left(&self) -> Option<&mut Node<D>> {
+    fn left(&self) -> Option<&Node<D>> {
         let node = self.left.load(Ordering::SeqCst);
         if node.is_null() {
             return None;
         }
-        Some(unsafe { &mut *node })
+        Some(unsafe { & *node })
+    }
+
+    fn left_ptr(&self) -> *mut Node<D> {
+        self.left.load(Ordering::SeqCst)
     }
 
     #[inline(always)]
     fn set_left(&self, node: &Node<D>) {
-        node.set_parent(self);
+        //node.set_parent(self);
         self.left.store(node.as_mut_ptr(), Ordering::SeqCst);
     }
 
-    fn parent(&self) -> Option<&mut Node<D>> {
+    fn set_left_ptr(&self, node: *mut Node<D>) {
+        self.left.store(node, Ordering::SeqCst);
+    }
+
+    fn parent(&self) -> Option<&Node<D>> {
         let node = self.parent.load(Ordering::SeqCst);
         if node.is_null() {
             return None;
         }
-        Some(unsafe { &mut *node })
+        Some(unsafe { &*node })
     }
 
     fn set_parent(&self, node: &Node<D>) {
@@ -270,6 +347,20 @@ where
     #[inline(always)]
     fn is_null(node: &AtomicPtr<Node<D>>) -> bool {
         node.load(Ordering::SeqCst).is_null()
+    }
+
+    fn sibling(node: &Node<D>) -> Option<&Node<D>> {
+        let Some(parent) = node.parent() else {
+            return None;
+        };
+
+        if node.as_mut_ptr() == parent.left.load(Ordering::SeqCst) {
+            return parent.right();
+        }
+        if node.as_mut_ptr() == parent.right.load(Ordering::SeqCst) {
+            return parent.left();
+        }
+        panic!("Node is not a child of it's parent")
     }
 }
 
@@ -286,80 +377,32 @@ where
 mod tests {
     extern crate std;
     use super::{Node, Rbt};
+    use core::sync::atomic::AtomicPtr;
     use std::println;
 
-    //    #[test]
-    //     fn simple_test() {
-    //         let mut rbt = Rbt::new();
-    //         assert!(rbt.insert(5).is_ok());
-    //         assert_eq!(rbt.storage.length, 1);
-    //         assert!(rbt.insert(3).is_ok());
-    //         assert!(rbt.insert(7).is_ok());
-    //         assert!(rbt.insert(2).is_ok());
-    //         assert!(rbt.insert(6).is_ok());
-    //         assert!(rbt.insert(8).is_ok());
-    //         assert!(rbt.insert(9).is_ok());
-    //         assert!(rbt.insert(10).is_ok());
-
-    //         let mut values = std::vec::Vec::new();
-    //         rbt.dfs(rbt.head(), &mut values);
-    //         println!("{:?}", values);
-
-    //         for (initialized, node) in rbt.storage.data.iter() {
-    //             if *initialized {
-    //                 println!("{:?}", unsafe { node.assume_init_ref() });
-    //             }
-    //         }
-    //     }
-}
-
-#[cfg(test)]
-mod fuzz_tests {
-    extern crate std;
-    use super::RBT_MAX_SIZE;
-    use super::{Node, Rbt};
-    use core::sync::atomic::AtomicPtr;
-    use rand::seq::SliceRandom;
-    use rand::Rng;
-    use std::collections::HashSet;
-    use std::vec::Vec;
-
     #[test]
-    fn fuzz_insert() {
-        for _ in 0..1 {
-            let mut rbt = Rbt::<usize>::new();
-            let mut rng = rand::thread_rng();
-            let min = 1;
-            let max = 100_000;
+    fn simple_test() {
+            let mut rbt = Rbt::new();
+            assert!(rbt.insert(5).is_ok());
+            assert_eq!(rbt.storage.length, 1);
+            assert!(rbt.insert(3).is_ok());
+            assert!(rbt.insert(7).is_ok());
+            assert!(rbt.insert(2).is_ok());
+            assert!(rbt.insert(6).is_ok());
+            assert!(rbt.insert(8).is_ok());
+            assert!(rbt.insert(9).is_ok());
+            assert!(rbt.insert(10).is_ok());
 
-            let mut random_numbers = HashSet::new();
+            let mut values = std::vec::Vec::new();
+            rbt.dfs(rbt.head(), &mut values);
+            println!("{:?}", values);
 
-            while random_numbers.len() < RBT_MAX_SIZE - 1 {
-                let num = rng.gen_range(min..=max);
-                random_numbers.insert(num);
+            for (initialized, node) in rbt.storage.data.iter() {
+                if *initialized {
+                    println!("{:?}", unsafe { node.assume_init_ref() });
+                }
             }
-
-            let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
-            random_numbers.shuffle(&mut rng);
-
-            assert_eq!(random_numbers.len(), RBT_MAX_SIZE - 1);
-            for num in random_numbers.iter() {
-                std::println!("{:?}", num);
-                assert!(rbt.insert(*num).is_ok());
-            }
-
-            random_numbers.sort();
-
-            let mut ordered_numbers = Vec::new();
-            rbt.dfs(rbt.head(), &mut ordered_numbers);
-            assert_eq!(ordered_numbers, random_numbers);
-            // for (initialized, node) in rbt.storage.data.iter() {
-            //     if *initialized {
-            //         std::println!("{:?}", unsafe { node.assume_init_ref() });
-            //     }
-            // }
         }
-    }
 
     #[test]
     fn test_rotate_right() {
@@ -396,6 +439,7 @@ mod fuzz_tests {
         assert!(right.left().is_none());
         assert!(right.right().is_none());
     }
+
     #[test]
     fn test_rotate_left() {
         /* Verifies that the rotate left function works as expected.
@@ -430,5 +474,89 @@ mod fuzz_tests {
         assert_eq!(node.right().unwrap().as_mut_ptr(), right_l.as_mut_ptr());
         assert!(right_l.left().is_none());
         assert!(right_l.right().is_none());
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests {
+    extern crate std;
+    use super::RBT_MAX_SIZE;
+    use super::{Node, Rbt};
+    use core::sync::atomic::AtomicPtr;
+    use rand::seq::SliceRandom;
+    use rand::Rng;
+    use std::collections::HashSet;
+    use std::vec::Vec;
+
+    #[test]
+    fn fuzz_insert() {
+        for _ in 0..1000 {
+            let mut rbt = Rbt::<usize>::new();
+            let mut rng = rand::thread_rng();
+            let min = 1;
+            let max = 100_000;
+
+            let mut random_numbers = HashSet::new();
+
+            while random_numbers.len() < RBT_MAX_SIZE - 1 {
+                let num = rng.gen_range(min..=max);
+                random_numbers.insert(num);
+            }
+
+            let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
+            random_numbers.shuffle(&mut rng);
+
+            assert_eq!(random_numbers.len(), RBT_MAX_SIZE - 1);
+            for num in random_numbers.iter() {
+                assert!(rbt.insert(*num).is_ok());
+            }
+
+            random_numbers.sort();
+
+            let mut ordered_numbers = Vec::new();
+            rbt.dfs(rbt.head(), &mut ordered_numbers);
+            assert_eq!(ordered_numbers, random_numbers);
+        }
+    }
+
+    
+    #[test]
+    fn fuzz_search() {
+        let mut bst = Rbt::<usize>::new();
+        let mut rng = rand::thread_rng();
+        let min = 1;
+        let max = 100_000;
+
+        let mut random_numbers = HashSet::new();
+        while random_numbers.len() < RBT_MAX_SIZE {
+            let num = rng.gen_range(min..=max);
+            random_numbers.insert(num);
+        }
+
+        let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
+        random_numbers.shuffle(&mut rng);
+
+        assert_eq!(random_numbers.len(), RBT_MAX_SIZE);
+        for num in random_numbers.iter() {
+            assert!(bst.insert(*num).is_ok());
+        }
+
+        // Search for numbers that exist in the tree
+        for _ in 0..10_000_000 {
+            let num = random_numbers.choose(&mut rng).unwrap();
+            assert!(bst.search(*num).is_some());
+        }
+
+        
+        // Search for numbers that do not exist in the tree
+        for _ in 0..10_000_000 {
+            let to_search = rng.gen_bool(0.5);
+            let random_number = if to_search {
+                rng.gen_range(0..=min)
+            } else {
+                rng.gen_range(max..=max + 50_000)
+            };
+            assert!(bst.search(random_number).is_none());
+        }
     }
 }

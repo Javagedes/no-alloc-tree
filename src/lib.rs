@@ -1,4 +1,5 @@
-// #![no_std]
+#![no_std]
+#![feature(let_chains)]
 pub mod bst;
 pub mod rbt;
 

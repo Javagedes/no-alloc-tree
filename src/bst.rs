@@ -44,6 +44,7 @@ where
         }
         unreachable!();
     }
+
     fn first_empty(&self) -> Option<usize> {
         for (index, node) in self.data.iter().enumerate() {
             if node.is_none() {
@@ -52,6 +53,7 @@ where
         }
         None
     }
+
     fn dfs(&self, idx: Option<usize>, values: &mut alloc::vec::Vec<D>) {
         if let Some(index) = idx {
             if let Some(node) = &self.data[index] {
@@ -60,6 +62,22 @@ where
                 self.dfs(node.right, values);
             }
         }
+    }
+
+    fn search(&self, data: D) -> Option<D> {
+        let mut current_idx = self.head;
+        while let Some(index) = current_idx {
+            if let Some(node) = &self.data[index] {
+                if data == node.data {
+                    return Some(node.data);
+                } else if data < node.data {
+                    current_idx = node.left;
+                } else {
+                    current_idx = node.right;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -115,34 +133,74 @@ mod fuzz_tests {
     use std::collections::HashSet;
     use std::vec::Vec;
 
-    // #[test]
-    // fn fuzz_insert() {
-    //     for _ in 0..100 {
-    //         let mut bst = Bst::<usize>::new();
-    //         let mut rng = rand::thread_rng();
-    //         let min = 1;
-    //         let max = 100_000;
+    #[test]
+    fn fuzz_insert() {
+        for _ in 0..1000 {
+            let mut bst = Bst::<usize>::new();
+            let mut rng = rand::thread_rng();
+            let min = 1;
+            let max = 100_000;
 
-    //         let mut random_numbers = HashSet::new();
+            let mut random_numbers = HashSet::new();
 
-    //         while random_numbers.len() < BST_MAX_SIZE {
-    //             let num = rng.gen_range(min..=max);
-    //             random_numbers.insert(num);
-    //         }
+            while random_numbers.len() < BST_MAX_SIZE {
+                let num = rng.gen_range(min..=max);
+                random_numbers.insert(num);
+            }
 
-    //         let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
-    //         random_numbers.shuffle(&mut rng);
+            let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
+            random_numbers.shuffle(&mut rng);
 
-    //         assert_eq!(random_numbers.len(), BST_MAX_SIZE);
-    //         for num in random_numbers.iter() {
-    //             assert!(bst.insert(*num).is_ok());
-    //         }
+            assert_eq!(random_numbers.len(), BST_MAX_SIZE);
+            for num in random_numbers.iter() {
+                assert!(bst.insert(*num).is_ok());
+            }
 
-    //         random_numbers.sort();
+            random_numbers.sort();
 
-    //         let mut ordered_numbers = Vec::new();
-    //         bst.dfs(bst.head, &mut ordered_numbers);
-    //         assert_eq!(ordered_numbers, random_numbers);
-    //     }
-    // }
+            let mut ordered_numbers = Vec::new();
+            bst.dfs(bst.head, &mut ordered_numbers);
+            assert_eq!(ordered_numbers, random_numbers);
+        }
+    }
+
+    #[test]
+    fn fuzz_search() {
+        let mut bst = Bst::<usize>::new();
+        let mut rng = rand::thread_rng();
+        let min = 50_000;
+        let max = 100_000;
+
+        let mut random_numbers = HashSet::new();
+        while random_numbers.len() < BST_MAX_SIZE {
+            let num = rng.gen_range(min..=max);
+            random_numbers.insert(num);
+        }
+
+        let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
+        random_numbers.shuffle(&mut rng);
+
+        assert_eq!(random_numbers.len(), BST_MAX_SIZE);
+        for num in random_numbers.iter() {
+            assert!(bst.insert(*num).is_ok());
+        }
+
+        // Search for numbers that exist in the tree
+        for _ in 0..10_000_000 {
+            let num = random_numbers.choose(&mut rng).unwrap();
+            assert!(bst.search(*num).is_some());
+        }
+
+
+        // Search for numbers that do not exist in the tree
+        for _ in 0..10_000_000 {
+            let to_search = rng.gen_bool(0.5);
+            let random_number = if to_search {
+                rng.gen_range(0..=min)
+            } else {
+                rng.gen_range(max..=max + 50_000)
+            };
+            assert!(bst.search(random_number).is_none());
+        }
+    }
 }
