@@ -29,6 +29,10 @@ where
         }
     }
 
+    fn len(&self) -> usize {
+        self.length
+    }
+
     /// Create a new storage container at the given pointer.
     /// 
     /// # Safety
@@ -71,17 +75,13 @@ where
         }
         None
     }
-
-    fn len(&self) -> usize {
-        self.length
-    }
 }
 
 /// A red-black tree that can hold up to `SIZE` nodes.
 /// 
 /// The tree is implemented using the [AtomicPtr] structure, so the target must support atomic operations.
 /// The storage is allocated on the stack with [Self::new] or statically at any address using [Self::new_at].
-
+/// TODO: storage probably needs to be stored differently as we want to allocate it at a specific address.
 pub struct Rbt<D, const SIZE: usize>
 where
     D: PartialOrd,
@@ -111,6 +111,7 @@ where
 
     pub fn insert(&mut self, data: D) -> Result<()> {
         let node = self.storage.add(data).unwrap();
+        node.set_color(RED);
 
         if self.head.load(Ordering::SeqCst).is_null() {
             node.set_color(BLACK);
@@ -121,7 +122,7 @@ where
         let head = unsafe { &mut *self.head.load(Ordering::SeqCst) };
 
         Self::insert_node(head, node);
-        Self::fixup(&self.head, node);
+        Self::fixup_insert(&self.head, node);
         head.set_color(BLACK);
 
         return Ok(());
@@ -166,23 +167,22 @@ where
         
         let color = current.is_red();
 
-        if current.left().is_none() | current.right().is_none() {
-            Self::delete_simple(head, current);
-            self.storage.delete(current.as_mut_ptr());
-            return Ok(())
+        let moved_up = if current.left().is_none() | current.right().is_none() {
+            Self::delete_simple(head, current)
         } else {
-            Self::delete_complex(current);
+            Self::delete_complex(current)
         };
 
-        if color == BLACK {
-            todo!() // maybe? Self::fixup(&self.head, new_node.unwrap());
+        if let Some(node) = moved_up && color == BLACK {
+            Self::fixup_delete(&self.head, node);
         }
 
-        todo!()
+        self.storage.delete(current.as_mut_ptr());
+        Ok(())
     }
 
     // Deletes a node with 0 or 1 children.
-    fn delete_simple(head: &Node<D>, node: &Node<D>) {
+    fn delete_simple<'a>(head: &'a Node<D>, node: &'a Node<D>) -> Option<&'a Node<D>> {
         let parent = match node.parent() {
             Some(parent) => parent,
             None => head,
@@ -194,6 +194,7 @@ where
             } else {
                 parent.set_right(left);
             }
+            return Some(left)
         } else if let Some(right) = node.right() {
             right.set_parent(node);
             if parent.left_ptr() == node.as_mut_ptr() {
@@ -201,17 +202,19 @@ where
             } else {
                 parent.set_right(right);
             }
+            return Some(right)
         } else {
             if parent.left_ptr() == node.as_mut_ptr() {
                 parent.set_left(ptr::null_mut());
             } else {
                 parent.set_right(ptr::null_mut());
             }
+            return None
         }
     }
 
     // Deletes a node with 2 children.
-    fn delete_complex(node: &Node<D>) {
+    fn delete_complex(node: &Node<D>) -> Option<&Node<D>> {
         todo!()
     }
 
@@ -219,28 +222,32 @@ where
         let mut current = start;
         loop {
             if node.data < current.data {
-                if let Some(left) = current.left() {
-                    current = left;
-                } else {
-                    current.set_left(node);
-                    node.set_parent(current);
-                    break;
+                match current.left() {
+                    Some(left) => current = left,
+                    None => {
+                        current.set_left(node);
+                        node.set_parent(current);
+                        return
+                    }
+                }
+            } else if node.data > current.data {
+                match current.right() {
+                    Some(right) => current = right,
+                    None => {
+                        current.set_right(node);
+                        node.set_parent(current);
+                        return
+                    },
                 }
             } else {
-                if let Some(right) = current.right() {
-                    current = right;
-                } else {
-                    current.set_right(node);
-                    node.set_parent(current);
-                    break;
-                }
+                panic!("Node already exists in the tree.");
             }
         }
     }
 
     fn rotate_left(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         let right_child = node.right().expect("Right Child should always exist when rotating.");
-
+        let parent = node.parent();
         node.set_right(right_child.left_ptr());
         if let Some(left) = right_child.left() {
             left.set_parent(node);
@@ -249,25 +256,24 @@ where
         right_child.set_left(node);
         node.set_parent(right_child);
 
-        let parent = node.parent().unwrap();
-        if Node::is_null(&node.parent) {
-            head.store(node.parent.load(Ordering::SeqCst), Ordering::SeqCst);
-        } else if parent.left_ptr() == node.as_mut_ptr() {
-            parent.set_left(node);
-            node.set_parent(parent);
-        } else if parent.right_ptr() == node.as_mut_ptr() {
-            parent.set_right(node);
-            node.set_parent(parent);
+        if let Some(parent) = parent {
+            if parent.left_ptr() == node.as_mut_ptr() {
+                parent.set_left(right_child);
+                right_child.set_parent(parent);
+            } else if parent.right_ptr() == node.as_mut_ptr() {
+                parent.set_right(right_child);
+                right_child.set_parent(parent);
+            } else {
+                panic!("Node is not a child of it's parents");
+            }
         } else {
-            panic!("Node is not a child of it's parents");
+            head.store(right_child.as_mut_ptr(), Ordering::SeqCst);
         }
-
-        right_child.set_parent(parent);
     }
 
-    // https://www.happycoders.eu/algorithms/red-black-tree-java/
     fn rotate_right(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         let left_child = node.left().unwrap();
+        let parent = node.parent();
 
         node.set_left(left_child.right_ptr());
         if let Some(right) = left_child.right() {
@@ -277,23 +283,22 @@ where
         left_child.set_right(node);
         node.set_parent(left_child);
 
-        let parent = node.parent().unwrap();
-        if Node::is_null(&node.parent) {
-            head.store(node.parent.load(Ordering::SeqCst), Ordering::SeqCst);
-        } else if parent.left.load(Ordering::SeqCst) == node.as_mut_ptr() {
-            parent.set_left(node);
-            node.set_parent(parent);
-        } else if parent.right.load(Ordering::SeqCst) == node.as_mut_ptr() {
-            parent.set_right(node);
-            node.set_parent(parent);
+        if let Some(parent) = parent {
+            if parent.left_ptr() == node.as_mut_ptr() {
+                parent.set_left(left_child);
+                left_child.set_parent(parent);
+            } else if parent.right_ptr() == node.as_mut_ptr() {
+                parent.set_right(left_child);
+                left_child.set_parent(parent);
+            } else {
+                panic!("Node is not a child of it's parents");
+            }
         } else {
-            panic!("Node is not a child of it's parents");
+            head.store(left_child.as_mut_ptr(), Ordering::SeqCst);
         }
-
-        left_child.set_parent(parent);
     }
 
-    fn fixup(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
+    fn fixup_insert(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         // Case 1: The node is the root of the tree, no fixups needed.
         let Some(parent) = node.parent() else {
             node.set_color(BLACK);
@@ -314,8 +319,9 @@ where
             parent.set_color(BLACK);
             grandparent.set_color(RED);
             uncle.set_color(BLACK);
-
-            todo!(); // Move to grandparent and do this same logic again. Need a while loop
+            
+            // Recursively fixup the grandparent
+            Self::fixup_insert(head, grandparent);
         }
 
         // Parent is left child of grandparent
@@ -332,7 +338,7 @@ where
         }
         // Parent is right child of grandparent
         else if parent.as_mut_ptr() == grandparent.right.load(Ordering::SeqCst) {
-            // Case 4b: unclde is black and node is right->left "inner child" of its grandparent
+            // Case 4b: uncle is black and node is right->left "inner child" of its grandparent
             if node.as_mut_ptr() == parent.left.load(Ordering::SeqCst) {
                 Self::rotate_right(head, parent);
                 grandparent.set_right(node);
@@ -341,8 +347,14 @@ where
 
             node.set_color(BLACK);
             grandparent.set_color(RED);
+        } else {
+            panic!("Parent is not a child of grandparent")
         }
-        panic!("Parent is not a child of grandparent")
+        
+    }
+
+    fn fixup_delete(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
+        todo!()
     }
 
     fn dfs(&self, node: Option<&Node<D>>, values: &mut alloc::vec::Vec<D>) {
@@ -352,9 +364,12 @@ where
             self.dfs(node.right(), values);
         }
     }
+
+    fn len(&self) -> usize {
+        self.storage.length
+    }
 }
 
-#[derive(Debug)]
 struct Node<D>
 where
     D: PartialOrd,
@@ -441,6 +456,10 @@ where
         Some(unsafe { &*node })
     }
 
+    fn parent_ptr(&self) -> *mut Node<D> {
+        self.parent.load(Ordering::SeqCst)
+    }
+
     fn set_parent<N: Into<*mut Node<D>>>(&self, node: N) {
         self.parent.store(node.into(), Ordering::SeqCst);
     }
@@ -448,11 +467,6 @@ where
     #[inline(always)]
     fn as_mut_ptr(&self) -> *mut Node<D> {
         self as *const _ as *mut _
-    }
-
-    #[inline(always)]
-    fn is_null(node: &AtomicPtr<Node<D>>) -> bool {
-        node.load(Ordering::SeqCst).is_null()
     }
 
     fn sibling(node: &Node<D>) -> Option<&Node<D>> {
@@ -465,6 +479,15 @@ where
     }
 }
 
+impl <D>core::fmt::Debug for Node<D>
+where
+    D: PartialOrd + core::fmt::Debug,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let color = if self.is_red() { "  RED" } else { "BLACK" };
+        write!(f, "Node {{ addr: {:?}, parent: {:12?}, left: {:12?}, right: {:12?}, color: {:?}, data: {:?} }}", self.as_mut_ptr(), self.parent_ptr(), self.left_ptr(), self.right_ptr(), color, self.data)
+    }
+}
 impl <D>From<&Node<D>> for *mut Node<D>
 where
     D: PartialOrd,
@@ -495,6 +518,7 @@ mod tests {
             assert!(rbt.insert(8).is_ok());
             assert!(rbt.insert(9).is_ok());
             assert!(rbt.insert(10).is_ok());
+            assert_eq!(rbt.storage.length, 8);
 
             let mut values = std::vec::Vec::new();
             rbt.dfs(rbt.head(), &mut values);
@@ -506,6 +530,114 @@ mod tests {
                 }
             }
         }
+
+    #[test]
+    fn test_case_3() {
+        /* Update colors when parent and uncle nodes are red.
+            [17B]                  [17B]
+             /  \                  /   \
+          [09B] [19B] -------->  [09B] [19R] <- Updated
+                /   \                   /  \
+              [18R] [75R]  Updated -> [18B] [75B] <- Updated
+                      \                       \
+                      [81R]                  [81R]
+        */
+        let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new();
+        rbt.insert(17).unwrap();
+        
+        // Head should be black
+        {
+            let head = rbt.head().unwrap();
+            assert!(head.is_black());
+        }
+        
+        // Insert a node to the right, should be red
+        rbt.insert(19).unwrap();
+        {
+            let head = rbt.head().unwrap();
+            assert!(head.is_black());
+            let right = head.right().unwrap();
+            assert!(right.is_red());
+        }
+
+        // Ensure no red-reds
+        rbt.insert(9).unwrap();
+        rbt.insert(18).unwrap();
+        rbt.insert(75).unwrap();
+        {
+            let head = rbt.head().unwrap();
+            assert!(head.is_black());
+            let right = head.right().unwrap();
+            assert!(right.is_black());
+            let right_l = right.left().unwrap();
+            assert!(right_l.is_red());
+            let right_r = right.right().unwrap();
+            assert!(right_r.is_red());
+        }
+
+        // Adding a node off of 75 should cause a color change
+        rbt.insert(81).unwrap();
+        {
+            let head = rbt.head().unwrap();
+            assert!(head.is_black());
+            let right = head.right().unwrap();
+            assert!(right.is_red());
+            let right_l = right.left().unwrap();
+            assert!(right_l.is_black());
+            let right_r = right.right().unwrap();
+            assert!(right_r.is_black());
+            let right_r_r = right_r.right().unwrap();
+            assert!(right_r_r.is_red());
+        }
+    }
+    
+    #[test]
+    fn test_case_4() {
+        /* Parent Node is red, uncle node is black, inserted node is Inner
+           grandchild should cause a rotation.
+
+          Final Expected State:
+                   [17B]
+                   /   \
+                [09B] [24B]
+                      /   \
+                    [19R] [75R]
+        */
+        let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new();
+        rbt.insert(17).unwrap();
+        rbt.insert(9).unwrap();
+        rbt.insert(19).unwrap();
+        rbt.insert(75).unwrap();
+        rbt.insert(24).unwrap();
+
+        // Validate head (17)
+        let head = rbt.head().unwrap();
+        assert!(head.is_black());
+
+        // Validate left child (9)
+        let left = head.left().unwrap();
+        assert!(left.is_black());
+        assert_eq!(left.data, 9);
+        assert_eq!(left.parent_ptr(), head.as_mut_ptr());
+
+        // Validate right child(24)
+        let right = head.right().unwrap();
+        assert!(right.is_black());
+        assert_eq!(right.data, 24);
+        assert_eq!(right.parent_ptr(), head.as_mut_ptr());
+
+        // Validate right child's left child (19)
+        let right_l = right.left().unwrap();
+        assert!(right_l.is_red());
+        assert_eq!(right_l.data, 19);
+        assert_eq!(right_l.parent_ptr(), right.as_mut_ptr());
+
+        // Validate right child's right child (75)
+        let right_r = right.right().unwrap();
+        assert!(right_r.is_red());
+        assert_eq!(right_r.data, 75);
+
+    }
 
     #[test]
     fn test_rotate_right() {
@@ -635,6 +767,7 @@ mod tests {
         assert_eq!(rbt.storage.len(), 0);
         assert_eq!(rbt.storage.data.iter().filter(|(i, _)|{*i}).count(), 0);
     }
+
     #[test]
     fn test_delete_simple() {
         /* Verifies that deleting a node with a single child or no child works as expected.
@@ -662,7 +795,6 @@ mod tests {
         Rbt::<i32, RBT_MAX_SIZE>::delete_simple(&node, &left_l);
         assert!(node.left().is_none());
     }
-
 }
 
 #[cfg(test)]
