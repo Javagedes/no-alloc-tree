@@ -194,13 +194,18 @@ where
             } else {
                 parent.set_right(left);
             }
-        }
-        if let Some(right) = node.right() {
+        } else if let Some(right) = node.right() {
             right.set_parent(node);
             if parent.left_ptr() == node.as_mut_ptr() {
                 parent.set_left(right);
             } else {
                 parent.set_right(right);
+            }
+        } else {
+            if parent.left_ptr() == node.as_mut_ptr() {
+                parent.set_left(ptr::null_mut());
+            } else {
+                parent.set_right(ptr::null_mut());
             }
         }
     }
@@ -218,6 +223,7 @@ where
                     current = left;
                 } else {
                     current.set_left(node);
+                    node.set_parent(current);
                     break;
                 }
             } else {
@@ -225,6 +231,7 @@ where
                     current = right;
                 } else {
                     current.set_right(node);
+                    node.set_parent(current);
                     break;
                 }
             }
@@ -467,7 +474,7 @@ where
 mod tests {
     extern crate std;
     use super::{Node, Rbt};
-    use core::sync::atomic::AtomicPtr;
+    use core::{ptr::null_mut, sync::atomic::{AtomicPtr, Ordering}};
     use std::println;
 
     const RBT_MAX_SIZE: usize = 0x1000;
@@ -519,15 +526,32 @@ mod tests {
         let head = AtomicPtr::<Node<i32>>::default();
 
         Rbt::<i32, RBT_MAX_SIZE>::rotate_right(&head, &node);
-
+        
+        // Check left[50] <-> left_l[10] connection
         assert_eq!(left.left().unwrap().as_mut_ptr(), left_l.as_mut_ptr());
+        assert_eq!(left_l.parent().unwrap().as_mut_ptr(), left.as_mut_ptr());
+
+        // check left[50] <-> left_r[70] connection 
         assert_eq!(left.right().unwrap().as_mut_ptr(), node.as_mut_ptr());
+        assert_eq!(node.parent().unwrap().as_mut_ptr(), left.as_mut_ptr());
+
+        // check left_l[10] has no children
         assert!(left_l.left().is_none());
         assert!(left_l.right().is_none());
+
+        // check node[75] <-> left_r[70] connection
         assert_eq!(node.left().unwrap().as_mut_ptr(), left_r.as_mut_ptr());
+        assert_eq!(left_r.parent().unwrap().as_mut_ptr(), node.as_mut_ptr());
+
+        // check node[75] <-> right[85] connection
         assert_eq!(node.right().unwrap().as_mut_ptr(), right.as_mut_ptr());
+        assert_eq!(right.parent().unwrap().as_mut_ptr(), node.as_mut_ptr());
+
+        // Check right_r[70] has no children
         assert!(left_r.left().is_none());
         assert!(left_r.right().is_none());
+
+        // Check right[85] has no children
         assert!(right.left().is_none());
         assert!(right.right().is_none());
     }
@@ -556,14 +580,31 @@ mod tests {
 
         Rbt::<i32, RBT_MAX_SIZE>::rotate_left(&head, &node);
 
+        // Check right[75] <-left-> node[50] connection
         assert_eq!(right.left().unwrap().as_mut_ptr(), node.as_mut_ptr());
+        assert_eq!(node.parent().unwrap().as_mut_ptr(), right.as_mut_ptr());
+
+        // Check right[75] <-right-> right_r[85] connection
+        assert_eq!(right.right().unwrap().as_mut_ptr(), right_r.as_mut_ptr());
+        assert_eq!(right_r.parent().unwrap().as_mut_ptr(), right.as_mut_ptr());
+
+        // Check node[50] <-left-> left[10] connection
         assert_eq!(node.left().unwrap().as_mut_ptr(), left.as_mut_ptr());
+        assert_eq!(left.parent().unwrap().as_mut_ptr(), node.as_mut_ptr());
+
+        // Check node[50] <-right-> right_l[70] connection
+        assert_eq!(node.right().unwrap().as_mut_ptr(), right_l.as_mut_ptr());
+        assert_eq!(right_l.parent().unwrap().as_mut_ptr(), node.as_mut_ptr());
+        
+        // Check left[10] has no children
         assert!(left.left().is_none());
         assert!(left.right().is_none());
-        assert_eq!(right.right().unwrap().as_mut_ptr(), right_r.as_mut_ptr());
+        
+        // Check right_r[85] has no children
         assert!(right_r.left().is_none());
         assert!(right_r.right().is_none());
-        assert_eq!(node.right().unwrap().as_mut_ptr(), right_l.as_mut_ptr());
+        
+        // Check right_l[70] has no children
         assert!(right_l.left().is_none());
         assert!(right_l.right().is_none());
     }
@@ -584,6 +625,13 @@ mod tests {
     }
     #[test]
     fn test_delete_simple() {
+        /* Verifies that deleting a node with a single child or no child works as expected.
+                [50]      [50]
+                /          /
+              [10]   ->  [05]   ->   [50]
+               /
+             [05]
+        */
         let node = Node::new(50);
         let left = Node::new(10);
         let left_l = Node::new(5);
@@ -592,9 +640,15 @@ mod tests {
         left.set_parent(&node);
         left.set_left(&left_l);
         left_l.set_parent(&left);
-
+        
+        // Delete a node with a single child.
         Rbt::<i32, RBT_MAX_SIZE>::delete_simple(&node, &left);
         assert_eq!(node.left().unwrap().as_mut_ptr(), left_l.as_mut_ptr());
+        assert_eq!(left_l.parent().unwrap().as_mut_ptr(), node.as_mut_ptr());
+
+        // Delete a node with no children.
+        Rbt::<i32, RBT_MAX_SIZE>::delete_simple(&node, &left_l);
+        assert!(node.left().is_none());
     }
 
 }
