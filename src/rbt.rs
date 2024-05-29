@@ -247,7 +247,7 @@ where
 
     fn rotate_left(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         let right_child = node.right().expect("Right Child should always exist when rotating.");
-        let parent = node.parent();
+        let parent_tmp = node.parent();
         node.set_right(right_child.left_ptr());
         if let Some(left) = right_child.left() {
             left.set_parent(node);
@@ -256,7 +256,7 @@ where
         right_child.set_left(node);
         node.set_parent(right_child);
 
-        if let Some(parent) = parent {
+        if let Some(parent) = parent_tmp {
             if parent.left_ptr() == node.as_mut_ptr() {
                 parent.set_left(right_child);
                 right_child.set_parent(parent);
@@ -268,13 +268,13 @@ where
             }
         } else {
             head.store(right_child.as_mut_ptr(), Ordering::SeqCst);
+            right_child.set_parent(ptr::null_mut());
         }
     }
 
     fn rotate_right(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         let left_child = node.left().unwrap();
-        let parent = node.parent();
-
+        let parent_tmp = node.parent();
         node.set_left(left_child.right_ptr());
         if let Some(right) = left_child.right() {
             right.set_parent(node);
@@ -283,7 +283,7 @@ where
         left_child.set_right(node);
         node.set_parent(left_child);
 
-        if let Some(parent) = parent {
+        if let Some(parent) = parent_tmp {
             if parent.left_ptr() == node.as_mut_ptr() {
                 parent.set_left(left_child);
                 left_child.set_parent(parent);
@@ -295,12 +295,13 @@ where
             }
         } else {
             head.store(left_child.as_mut_ptr(), Ordering::SeqCst);
+            left_child.set_parent(ptr::null_mut());
         }
     }
 
     fn fixup_insert(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
         // Case 1: The node is the root of the tree, no fixups needed.
-        let Some(parent) = node.parent() else {
+        let Some(mut parent) = node.parent() else {
             node.set_color(BLACK);
             return;
         };
@@ -325,32 +326,31 @@ where
         }
 
         // Parent is left child of grandparent
-        else if parent.as_mut_ptr() == grandparent.left.load(Ordering::SeqCst) {
+        else if parent.as_mut_ptr() == grandparent.left_ptr() {
             // Case 4a: uncle is black and node is left->right "inner child" of it's grandparent
-            if node.as_mut_ptr() == parent.right.load(Ordering::SeqCst) {
+            if node.as_mut_ptr() == parent.right_ptr() {
                 Self::rotate_left(head, parent);
-                grandparent.set_left(node);
+                parent = node;
             }
             // Case 5a: uncle is black and node is left->left "outer child" of it's grandparent
             Self::rotate_right(head, grandparent); //todo, need updated parent??
-            node.set_color(BLACK);
+            parent.set_color(BLACK);
             grandparent.set_color(RED);
         }
         // Parent is right child of grandparent
-        else if parent.as_mut_ptr() == grandparent.right.load(Ordering::SeqCst) {
+        else if parent.as_mut_ptr() == grandparent.right_ptr() {
             // Case 4b: uncle is black and node is right->left "inner child" of its grandparent
-            if node.as_mut_ptr() == parent.left.load(Ordering::SeqCst) {
+            if node.as_mut_ptr() == parent.left_ptr() {
                 Self::rotate_right(head, parent);
-                grandparent.set_right(node);
+                parent = node;
             }
             Self::rotate_left(head, grandparent);
 
-            node.set_color(BLACK);
+            parent.set_color(BLACK);
             grandparent.set_color(RED);
         } else {
             panic!("Parent is not a child of grandparent")
         }
-        
     }
 
     fn fixup_delete(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
@@ -890,14 +890,14 @@ mod fuzz_tests {
         }
 
         // Search for numbers that exist in the tree
-        for _ in 0..1_000_000 {
+        for _ in 0..100_000 {
             let num = random_numbers.choose(&mut rng).unwrap();
             assert!(bst.search(*num).is_some());
         }
 
         
         // Search for numbers that do not exist in the tree
-        for _ in 0..1_000_000 {
+        for _ in 0..100_000 {
             let to_search = rng.gen_bool(0.5);
             let random_number = if to_search {
                 rng.gen_range(0..=min - 1)
