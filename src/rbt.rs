@@ -254,8 +254,10 @@ where
             head.store(node.parent.load(Ordering::SeqCst), Ordering::SeqCst);
         } else if parent.left_ptr() == node.as_mut_ptr() {
             parent.set_left(node);
+            node.set_parent(parent);
         } else if parent.right_ptr() == node.as_mut_ptr() {
             parent.set_right(node);
+            node.set_parent(parent);
         } else {
             panic!("Node is not a child of it's parents");
         }
@@ -280,8 +282,10 @@ where
             head.store(node.parent.load(Ordering::SeqCst), Ordering::SeqCst);
         } else if parent.left.load(Ordering::SeqCst) == node.as_mut_ptr() {
             parent.set_left(node);
+            node.set_parent(parent);
         } else if parent.right.load(Ordering::SeqCst) == node.as_mut_ptr() {
             parent.set_right(node);
+            node.set_parent(parent);
         } else {
             panic!("Node is not a child of it's parents");
         }
@@ -519,9 +523,13 @@ mod tests {
         let left_r = Node::new(70);
 
         left.set_left(&left_l);
+        left_l.set_parent(&left);
         left.set_right(&left_r);
+        left_r.set_parent(&left);
         node.set_left(&left);
+        left.set_parent(&node);
         node.set_right(&right);
+        right.set_parent(&node);
 
         let head = AtomicPtr::<Node<i32>>::default();
 
@@ -572,9 +580,13 @@ mod tests {
         let right_r = Node::new(85);
 
         right.set_left(&right_l);
+        right_l.set_parent(&right);
         right.set_right(&right_r);
+        right_r.set_parent(&right);
         node.set_left(&left);
+        left.set_parent(&node);
         node.set_right(&right);
+        right.set_parent(&node);
 
         let head = AtomicPtr::<Node<i32>>::default();
 
