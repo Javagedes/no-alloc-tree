@@ -1,8 +1,8 @@
 extern crate alloc;
-use core::{mem::MaybeUninit, ptr, sync::atomic::{AtomicPtr, Ordering}};
+use core::{mem::MaybeUninit, panic, ptr, sync::atomic::{AtomicPtr, Ordering}};
+use core::ptr::null_mut;
 
 use super::{Error, Result};
-const BST_MAX_SIZE: usize = 4096;
 
 struct Storage<D, const SIZE: usize>
 where
@@ -14,7 +14,7 @@ where
 
 impl<D, const SIZE: usize> Storage<D, {SIZE}>
 where
-    D: PartialOrd,
+    D: PartialOrd + core::fmt::Debug,
 {
     /// Create a new storage container.
     fn new() -> Storage<D, SIZE> {
@@ -132,6 +132,10 @@ where
     }
 
     pub fn search(&self, data: D) -> Option<D> {
+        self.search_node(data).map(|node| node.data)
+    }
+
+    fn search_node(&self, data: D) -> Option<&Node<D>> {
         let mut current = self.head();
         while let Some(node) = current {
             if data < node.data {
@@ -139,14 +143,77 @@ where
             } else if data > node.data {
                 current = node.right();
             } else {
-                return Some(node.data);
+                return Some(node);
             }
         }
         None
     }
 
-    pub fn delete(&self, data: D) -> Option<D> {
-        todo!()
+    fn replace_node(head: &AtomicPtr<Node<D>>, old: *mut Node<D>, new: *mut Node<D>) {
+        if let Some(parent) = unsafe { & *old }.parent() {
+            if parent.left_ptr() == old {
+                parent.set_left(new);
+            } else if parent.right_ptr() == old {
+                parent.set_right(new);
+            } else {
+                panic!("BST is corrupted. Parent does not point to child");
+            }
+
+            if !new.is_null() {
+                unsafe { & *new }.set_parent(parent);
+            }
+        // If the old node has no parent, it is the head of the tree
+        } else if !new.is_null() {
+            head.store(new, Ordering::SeqCst);
+            if !new.is_null() {
+                unsafe { & *new }.set_parent(null_mut());
+            }
+        }
+    }
+
+    pub fn delete(&mut self, data: D) -> Result<()> {
+        let Some(to_delete) = self.search_node(data) else {
+            return Err(Error::NotFound);
+        };
+
+        let left = to_delete.left();
+        let right = to_delete.right();
+
+        // Node has no children, unlink from parent and delete
+        if left.is_none() && right.is_none() {
+            Self::replace_node(&self.head, to_delete.as_mut_ptr(), null_mut());
+        }
+        // Node only has one child (right)
+        else if left.is_none() {
+            Self::replace_node(&self.head, to_delete.as_mut_ptr(), right.unwrap().as_mut_ptr());
+        }
+        // Node only has one child (left)
+        else if right.is_none() {
+            Self::replace_node(&self.head, to_delete.as_mut_ptr(), left.unwrap().as_mut_ptr());
+        }
+        // Node has both children
+        else {
+            let left = left.unwrap();
+            let right = right.unwrap();
+            // find the in-order successor - left most child of the right subtree
+            let mut successor = right;
+            while let Some(left) = successor.left() {
+                successor = left;
+            }
+
+            // If the successor is not the right child, replace the successor with it's right child
+            if successor.as_mut_ptr() != right.as_mut_ptr() {
+                Self::replace_node(&self.head, successor.as_mut_ptr(), successor.right_ptr());
+                successor.set_right(right);
+                right.set_parent(successor);
+            }
+            Self::replace_node(&self.head, to_delete.as_mut_ptr(), successor.as_mut_ptr());
+            successor.set_left(left);
+            left.set_parent(successor);
+        }
+
+        self.storage.delete(to_delete.as_mut_ptr());
+        Ok(())
     }
 
     fn dfs(&self, node: Option<&Node<D>>, values: &mut alloc::vec::Vec<D>) {
@@ -158,6 +225,7 @@ where
     }
 }
 
+#[derive(Debug)]
 struct Node<D>
 where
     D: PartialOrd
@@ -250,16 +318,17 @@ mod tests {}
 mod fuzz_tests {
     extern crate std;
     use super::Bst;
-    use super::BST_MAX_SIZE;
     use rand::seq::SliceRandom;
     use rand::Rng;
     use std::collections::HashSet;
     use std::vec::Vec;
 
+    const BST_MAX_SIZE: usize = 4096;
+
     #[test]
     fn fuzz_insert() {
         for _ in 0..100 {
-            let mut bst: Bst<i32, 4096> = Bst::new();
+            let mut bst: Bst<i32, BST_MAX_SIZE> = Bst::new();
             let mut rng = rand::thread_rng();
             let min = 1;
             let max = 100_000;
@@ -289,7 +358,7 @@ mod fuzz_tests {
 
     #[test]
     fn fuzz_search() {
-        let mut bst: Bst<i32, 4096> = Bst::new();
+        let mut bst: Bst<i32, BST_MAX_SIZE> = Bst::new();
         let mut rng = rand::thread_rng();
         let min = 50_000;
         let max = 100_000;
@@ -324,5 +393,38 @@ mod fuzz_tests {
             };
             assert!(bst.search(random_number).is_none());
         }
+    }
+
+    #[test]
+    fn fuzz_delete() {
+        let mut rbt: Bst<usize, BST_MAX_SIZE> = Bst::new();
+        let mut rng = rand::thread_rng();
+        let min = 1;
+        let max = 100_000;
+
+        let mut random_numbers = HashSet::new();
+        while random_numbers.len() < BST_MAX_SIZE {
+            let num = rng.gen_range(min..=max);
+            random_numbers.insert(num);
+        }
+
+        let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
+        random_numbers.shuffle(&mut rng);
+        
+        assert_eq!(random_numbers.len(), BST_MAX_SIZE);
+        for num in random_numbers.iter() {
+            assert!(rbt.insert(*num).is_ok());
+        }
+
+        // Delete all the numbers
+        random_numbers.shuffle(&mut rng);
+        while let Some(num) = random_numbers.pop() {
+            match rbt.delete(num) {
+                Ok(_) => (),
+                Err(e) => assert!(false, "{:?}", e),
+            }
+        }
+
+        assert_eq!(rbt.storage.length, 0);
     }
 }
