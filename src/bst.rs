@@ -10,6 +10,7 @@ where
 {
     data: [(bool, MaybeUninit<Node<D>>); SIZE],
     length: usize,
+    free_indices: arrayvec::ArrayVec<u16, SIZE>,
 }
 
 impl<D, const SIZE: usize> Storage<D, {SIZE}>
@@ -21,6 +22,7 @@ where
         Storage {
             data: unsafe { MaybeUninit::zeroed().assume_init() },
             length: 0,
+            free_indices: arrayvec::ArrayVec::from(array_init::array_init(|i| i as u16)),
         }
     }
 
@@ -34,16 +36,19 @@ where
             ptr::write(ptr, Storage {
                 data: MaybeUninit::zeroed().assume_init(),
                 length: 0,
+                free_indices: arrayvec::ArrayVec::from(array_init::array_init(|i| (i + 1) as u16)),
             });
             &*ptr
     }
 
     /// Add a new node to the storage container, returning a mutable reference to the node.
     fn add(&mut self, data: D) -> Result<&mut Node<D>> {
-        if let Some(index) = self.first_null() {
-            self.data[index] = (true, MaybeUninit::new(Node::new(data)));
+        //if let Some(index) = self.first_null() {
+        if let Some(index) = self.free_indices.pop() {
+            self.data[index as usize] = (true, MaybeUninit::new(Node::new(data)));
+            
+            let (_, node) = self.data.get_mut(index as usize).unwrap();
             self.length += 1;
-            let (_, node) = self.data.get_mut(index).unwrap();
             return Ok(unsafe { node.assume_init_mut() });
         }
         Err(Error::OutOfSpace)

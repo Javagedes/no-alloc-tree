@@ -8,6 +8,16 @@ edition = "2021"
 [dependencies]
 array-init = "2.1.0"
 arrayvec = { version = "0.7.4", default-features = false }
+src = "0.0.6"
 
 [dev-dependencies]
 rand = "0.8.5"
+criterion = "0.5.1"
+
+[[bench]]
+name = "bench_insert"
+harness = false
+
+[[bench]]
+name = "bench_delete"
+harness = false
