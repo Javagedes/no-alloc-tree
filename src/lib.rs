@@ -17,4 +17,4 @@ pub enum Error {
 pub trait SortedSliceKey {
     type Key: Ord;
     fn ordering_key(&self) -> &Self::Key;
-  }
+}

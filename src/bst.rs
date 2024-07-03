@@ -1,55 +1,67 @@
 extern crate alloc;
-use core::{mem::MaybeUninit, panic, ptr, sync::atomic::{AtomicPtr, Ordering}};
 use core::ptr::null_mut;
+use core::{
+    mem::size_of,
+    panic, slice,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 use super::{Error, Result};
 
-struct Storage<D, const SIZE: usize>
+pub const fn node_size<D: core::cmp::PartialOrd>() -> usize {
+    size_of::<(bool, Node<D>)>()
+}
+
+pub trait BstKey {
+    type Key: Ord;
+    fn ordering_key(&self) -> &Self::Key;
+}
+
+impl<T> BstKey for T
+where
+    T: Ord,
+{
+    type Key = Self;
+    fn ordering_key(&self) -> &T {
+        self
+    }
+}
+
+pub struct Storage<'a, D, const SIZE: usize>
 where
     D: PartialOrd,
 {
-    data: [(bool, MaybeUninit<Node<D>>); SIZE],
-    length: usize,
+    pub data: &'a mut [(bool, Node<D>)],
+    pub length: usize,
     free_indices: arrayvec::ArrayVec<u16, SIZE>,
 }
 
-impl<D, const SIZE: usize> Storage<D, {SIZE}>
+impl<'a, D, const SIZE: usize> Storage<'a, D, { SIZE }>
 where
     D: PartialOrd + core::fmt::Debug,
 {
     /// Create a new storage container.
-    fn new() -> Storage<D, SIZE> {
+    fn new(slice: &'a mut [u8]) -> Storage<'a, D, SIZE> {
         Storage {
-            data: unsafe { MaybeUninit::zeroed().assume_init() },
+            data: unsafe {
+                slice::from_raw_parts_mut::<'a, (bool, Node<D>)>(
+                    slice as *mut [u8] as *mut (bool, Node<D>),
+                    SIZE,
+                )
+            },
             length: 0,
             free_indices: arrayvec::ArrayVec::from(array_init::array_init(|i| i as u16)),
         }
     }
 
-    /// Create a new storage container at the given pointer.
-    /// 
-    /// # Safety
-    /// 
-    /// The pointer must be valid and must not be used after the storage is dropped.
-    /// This function will zero out all memory at the given address for the storage.
-    unsafe fn new_at(ptr: *mut Storage<D, SIZE>) -> &'static Storage<D, SIZE> {
-            ptr::write(ptr, Storage {
-                data: MaybeUninit::zeroed().assume_init(),
-                length: 0,
-                free_indices: arrayvec::ArrayVec::from(array_init::array_init(|i| (i + 1) as u16)),
-            });
-            &*ptr
-    }
-
     /// Add a new node to the storage container, returning a mutable reference to the node.
     fn add(&mut self, data: D) -> Result<&mut Node<D>> {
-        //if let Some(index) = self.first_null() {
         if let Some(index) = self.free_indices.pop() {
-            self.data[index as usize] = (true, MaybeUninit::new(Node::new(data)));
-            
+            self.data[index as usize] = (true, Node::new(data));
+
             let (_, node) = self.data.get_mut(index as usize).unwrap();
             self.length += 1;
-            return Ok(unsafe { node.assume_init_mut() });
+            return Ok(node);
         }
         Err(Error::OutOfSpace)
     }
@@ -57,47 +69,39 @@ where
     /// Delete a node from the storage container.
     fn delete(&mut self, ptr: *mut Node<D>) {
         // Calculate the index of the node in the storage container based off the pointer.
-        let index = (ptr as usize - self.data.as_ptr() as usize) / core::mem::size_of::<(bool, MaybeUninit<Node<D>>)>();
+        let index =
+            (ptr as usize - self.data.as_ptr() as usize) / core::mem::size_of::<(bool, Node<D>)>();
         self.data[index].0 = false;
         self.length -= 1;
-    }
-
-    /// Find the first null node in the storage container.
-    fn first_null(&self) -> Option<usize> {
-        for (index, (init, _)) in self.data.iter().enumerate() {
-            if !init {
-                return Some(index);
-            }
-        }
-        None
+        self.free_indices.push(index as u16);
     }
 }
 
-pub struct Bst<D, const SIZE: usize>
+pub struct Bst<'a, D, const SIZE: usize>
 where
-    D: PartialOrd
+    D: PartialOrd,
 {
-    storage: Storage<D, SIZE>,
-    head: AtomicPtr<Node<D>>,
+    pub storage: Storage<'a, D, SIZE>,
+    pub head: AtomicPtr<Node<D>>,
 }
 
-impl<D, const SIZE: usize> Bst<D, {SIZE}>
+impl<'a, D, const SIZE: usize> Bst<'a, D, { SIZE }>
 where
-    D: PartialOrd + Copy + core::fmt::Debug,
+    D: PartialOrd + Copy + core::fmt::Debug + BstKey,
 {
-    pub fn new() -> Self {
+    pub fn new(slice: &'a mut [u8]) -> Self {
         Self {
-            storage: Storage::new(),
+            storage: Storage::new(slice),
             head: AtomicPtr::default(),
         }
     }
 
-    fn head(&self) -> Option<&Node<D>> {
+    pub fn head(&self) -> Option<&Node<D>> {
         let head_ptr = self.head.load(Ordering::SeqCst);
         if head_ptr.is_null() {
             return None;
         }
-        Some(unsafe { & *head_ptr })
+        Some(unsafe { &*head_ptr })
     }
 
     pub fn insert(&mut self, data: D) -> Result<()> {
@@ -108,7 +112,7 @@ where
             return Ok(());
         }
 
-        let head = unsafe { & *self.head.load(Ordering::SeqCst) };
+        let head = unsafe { &*self.head.load(Ordering::SeqCst) };
         let mut current = head;
         loop {
             if node.data < current.data {
@@ -117,7 +121,7 @@ where
                     None => {
                         current.set_left(node.as_mut_ptr());
                         node.set_parent(current);
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             } else if node.data > current.data {
@@ -126,26 +130,25 @@ where
                     None => {
                         current.set_right(node.as_mut_ptr());
                         node.set_parent(current);
-                        return Ok(())
+                        return Ok(());
                     }
                 }
             } else {
                 panic!("Duplicate data found in the tree");
             }
         }
-        
     }
 
-    pub fn search(&self, data: D) -> Option<D> {
-        self.search_node(data).map(|node| node.data)
+    pub fn search(&self, key: &D::Key) -> Option<D> {
+        self.search_node(key).map(|node| node.data)
     }
 
-    fn search_node(&self, data: D) -> Option<&Node<D>> {
+    fn search_node(&self, key: &D::Key) -> Option<&Node<D>> {
         let mut current = self.head();
         while let Some(node) = current {
-            if data < node.data {
+            if key < node.data.ordering_key() {
                 current = node.left();
-            } else if data > node.data {
+            } else if key > node.data.ordering_key() {
                 current = node.right();
             } else {
                 return Some(node);
@@ -155,7 +158,7 @@ where
     }
 
     fn replace_node(head: &AtomicPtr<Node<D>>, old: *mut Node<D>, new: *mut Node<D>) {
-        if let Some(parent) = unsafe { & *old }.parent() {
+        if let Some(parent) = unsafe { &*old }.parent() {
             if parent.left_ptr() == old {
                 parent.set_left(new);
             } else if parent.right_ptr() == old {
@@ -165,19 +168,19 @@ where
             }
 
             if !new.is_null() {
-                unsafe { & *new }.set_parent(parent);
+                unsafe { &*new }.set_parent(parent);
             }
         // If the old node has no parent, it is the head of the tree
         } else if !new.is_null() {
             head.store(new, Ordering::SeqCst);
             if !new.is_null() {
-                unsafe { & *new }.set_parent(null_mut());
+                unsafe { &*new }.set_parent(null_mut());
             }
         }
     }
 
     pub fn delete(&mut self, data: D) -> Result<()> {
-        let Some(to_delete) = self.search_node(data) else {
+        let Some(to_delete) = self.search_node(data.ordering_key()) else {
             return Err(Error::NotFound);
         };
 
@@ -190,11 +193,19 @@ where
         }
         // Node only has one child (right)
         else if left.is_none() {
-            Self::replace_node(&self.head, to_delete.as_mut_ptr(), right.unwrap().as_mut_ptr());
+            Self::replace_node(
+                &self.head,
+                to_delete.as_mut_ptr(),
+                right.unwrap().as_mut_ptr(),
+            );
         }
         // Node only has one child (left)
         else if right.is_none() {
-            Self::replace_node(&self.head, to_delete.as_mut_ptr(), left.unwrap().as_mut_ptr());
+            Self::replace_node(
+                &self.head,
+                to_delete.as_mut_ptr(),
+                left.unwrap().as_mut_ptr(),
+            );
         }
         // Node has both children
         else {
@@ -221,6 +232,7 @@ where
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn dfs(&self, node: Option<&Node<D>>, values: &mut alloc::vec::Vec<D>) {
         if let Some(node) = node {
             self.dfs(node.left(), values);
@@ -231,9 +243,9 @@ where
 }
 
 #[derive(Debug)]
-struct Node<D>
+pub struct Node<D>
 where
-    D: PartialOrd
+    D: PartialOrd,
 {
     data: D,
     parent: AtomicPtr<Node<D>>,
@@ -259,7 +271,7 @@ where
         if node.is_null() {
             return None;
         }
-        Some(unsafe { & *node })
+        Some(unsafe { &*node })
     }
 
     fn right_ptr(&self) -> *mut Node<D> {
@@ -275,7 +287,7 @@ where
         if node.is_null() {
             return None;
         }
-        Some(unsafe { & *node })
+        Some(unsafe { &*node })
     }
 
     fn left_ptr(&self) -> *mut Node<D> {
@@ -291,9 +303,10 @@ where
         if node.is_null() {
             return None;
         }
-        Some(unsafe { & *node })
+        Some(unsafe { &*node })
     }
 
+    #[allow(dead_code)]
     fn parent_ptr(&self) -> *mut Node<D> {
         self.parent.load(Ordering::SeqCst)
     }
@@ -302,12 +315,12 @@ where
         self.parent.store(node.into(), Ordering::SeqCst);
     }
 
-    fn as_mut_ptr(&self) -> *mut Node<D> {
+    pub fn as_mut_ptr(&self) -> *mut Node<D> {
         self as *const _ as *mut _
     }
 }
 
-impl <D>From<&Node<D>> for *mut Node<D>
+impl<D> From<&Node<D>> for *mut Node<D>
 where
     D: PartialOrd,
 {
@@ -322,7 +335,7 @@ mod tests {}
 #[cfg(test)]
 mod fuzz_tests {
     extern crate std;
-    use super::Bst;
+    use super::{node_size, Bst};
     use rand::seq::SliceRandom;
     use rand::Rng;
     use std::collections::HashSet;
@@ -333,7 +346,8 @@ mod fuzz_tests {
     #[test]
     fn fuzz_insert() {
         for _ in 0..100 {
-            let mut bst: Bst<i32, BST_MAX_SIZE> = Bst::new();
+            let mut mem = [0; BST_MAX_SIZE * node_size::<i32>()];
+            let mut bst: Bst<i32, BST_MAX_SIZE> = Bst::new(&mut mem);
             let mut rng = rand::thread_rng();
             let min = 1;
             let max = 100_000;
@@ -363,7 +377,8 @@ mod fuzz_tests {
 
     #[test]
     fn fuzz_search() {
-        let mut bst: Bst<i32, BST_MAX_SIZE> = Bst::new();
+        let mut mem = [0; BST_MAX_SIZE * node_size::<i32>()];
+        let mut bst: Bst<i32, BST_MAX_SIZE> = Bst::new(&mut mem);
         let mut rng = rand::thread_rng();
         let min = 50_000;
         let max = 100_000;
@@ -385,7 +400,7 @@ mod fuzz_tests {
         // Search for numbers that exist in the tree
         for _ in 0..100_000 {
             let num = random_numbers.choose(&mut rng).unwrap();
-            assert!(bst.search(*num).is_some());
+            assert!(bst.search(num).is_some());
         }
 
         // Search for numbers that do not exist in the tree
@@ -396,13 +411,14 @@ mod fuzz_tests {
             } else {
                 rng.gen_range(max + 1..=max + 50_000)
             };
-            assert!(bst.search(random_number).is_none());
+            assert!(bst.search(&random_number).is_none());
         }
     }
 
     #[test]
     fn fuzz_delete() {
-        let mut rbt: Bst<usize, BST_MAX_SIZE> = Bst::new();
+        let mut mem = [0; BST_MAX_SIZE * node_size::<i32>()];
+        let mut rbt: Bst<usize, BST_MAX_SIZE> = Bst::new(&mut mem);
         let mut rng = rand::thread_rng();
         let min = 1;
         let max = 100_000;
@@ -415,7 +431,7 @@ mod fuzz_tests {
 
         let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
         random_numbers.shuffle(&mut rng);
-        
+
         assert_eq!(random_numbers.len(), BST_MAX_SIZE);
         for num in random_numbers.iter() {
             assert!(rbt.insert(*num).is_ok());

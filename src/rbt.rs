@@ -1,31 +1,59 @@
 extern crate alloc;
 
+use crate::bst::BstKey;
+
 use super::{Error, Result};
-use core::mem::MaybeUninit;
-use core::ptr;
+use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::{ptr, slice};
 
 const RED: bool = false;
 const BLACK: bool = true;
 
+pub const fn node_size<D: core::cmp::PartialOrd>() -> usize {
+    size_of::<(bool, Node<D>)>()
+}
+
+pub trait RbtKey {
+    type Key: Ord;
+    fn ordering_key(&self) -> &Self::Key;
+}
+
+impl<T> RbtKey for T
+where
+    T: Ord,
+{
+    type Key = Self;
+    fn ordering_key(&self) -> &T {
+        self
+    }
+}
+
 /// A on-stack storage container for the nodes of a red-black tree.
-struct Storage<D, const SIZE: usize>
+struct Storage<'a, D, const SIZE: usize>
 where
     D: PartialOrd,
 {
-    data: [(bool, MaybeUninit<Node<D>>); SIZE],
+    data: &'a mut [(bool, Node<D>)],
     length: usize,
+    free_indices: arrayvec::ArrayVec<u16, SIZE>,
 }
 
-impl<D, const SIZE: usize> Storage<D, {SIZE}>
+impl<'a, D, const SIZE: usize> Storage<'a, D, { SIZE }>
 where
     D: PartialOrd,
 {
     /// Create a new storage container.
-    fn new() -> Storage<D, SIZE> {
+    fn new(slice: &'a mut [u8]) -> Storage<'a, D, SIZE> {
         Storage {
-            data: unsafe { MaybeUninit::zeroed().assume_init() },
+            data: unsafe {
+                slice::from_raw_parts_mut::<'a, (bool, Node<D>)>(
+                    slice as *mut [u8] as *mut (bool, Node<D>),
+                    SIZE,
+                )
+            },
             length: 0,
+            free_indices: arrayvec::ArrayVec::from(array_init::array_init(|i| i as u16)),
         }
     }
 
@@ -33,27 +61,13 @@ where
         self.length
     }
 
-    /// Create a new storage container at the given pointer.
-    /// 
-    /// # Safety
-    /// 
-    /// The pointer must be valid and must not be used after the storage is dropped.
-    /// This function will zero out all memory at the given address for the storage.
-    unsafe fn new_at(ptr: *mut Storage<D, SIZE>) -> &'static Storage<D, SIZE> {
-            ptr::write(ptr, Storage {
-                data: MaybeUninit::zeroed().assume_init(),
-                length: 0,
-            });
-            &*ptr
-    }
-
     /// Add a new node to the storage container, returning a mutable reference to the node.
     fn add(&mut self, data: D) -> Result<&mut Node<D>> {
-        if let Some(index) = self.first_null() {
-            self.data[index] = (true, MaybeUninit::new(Node::new(data)));
+        if let Some(index) = self.free_indices.pop() {
+            self.data[index as usize] = (true, Node::new(data));
+            let (_, node) = self.data.get_mut(index as usize).unwrap();
             self.length += 1;
-            let (_, node) = self.data.get_mut(index).unwrap();
-            return Ok(unsafe { node.assume_init_mut() });
+            return Ok(node);
         }
         Err(Error::OutOfSpace)
     }
@@ -61,43 +75,35 @@ where
     /// Delete a node from the storage container.
     fn delete(&mut self, ptr: *mut Node<D>) {
         // Calculate the index of the node in the storage container based off the pointer.
-        let index = (ptr as usize - self.data.as_ptr() as usize) / core::mem::size_of::<(bool, MaybeUninit<Node<D>>)>();
+        let index =
+            (ptr as usize - self.data.as_ptr() as usize) / core::mem::size_of::<(bool, Node<D>)>();
         self.data[index].0 = false;
         self.length -= 1;
-    }
-
-    /// Find the first null node in the storage container.
-    fn first_null(&self) -> Option<usize> {
-        for (index, (init, _)) in self.data.iter().enumerate() {
-            if !init {
-                return Some(index);
-            }
-        }
-        None
+        self.free_indices.push(index as u16);
     }
 }
 
 /// A red-black tree that can hold up to `SIZE` nodes.
-/// 
+///
 /// The tree is implemented using the [AtomicPtr] structure, so the target must support atomic operations.
 /// The storage is allocated on the stack with [Self::new] or statically at any address using [Self::new_at].
 /// TODO: storage probably needs to be stored differently as we want to allocate it at a specific address.
-pub struct Rbt<D, const SIZE: usize>
+pub struct Rbt<'a, D, const SIZE: usize>
 where
     D: PartialOrd,
 {
-    storage: Storage<D, SIZE>,
+    storage: Storage<'a, D, SIZE>,
     head: AtomicPtr<Node<D>>,
 }
 
-impl<D, const SIZE: usize> Rbt<D, {SIZE}>
+impl<'a, D, const SIZE: usize> Rbt<'a, D, { SIZE }>
 where
-    D: PartialOrd + Copy + core::fmt::Debug,
+    D: PartialOrd + Copy + core::fmt::Debug + BstKey,
 {
-    pub fn new() -> Rbt<D, SIZE> {
+    pub fn new(slice: &'a mut [u8]) -> Rbt<D, SIZE> {
         Rbt {
-            storage: Storage::new(),
-            head: AtomicPtr::new(ptr::null_mut()),
+            storage: Storage::new(slice),
+            head: AtomicPtr::default(),
         }
     }
 
@@ -106,7 +112,7 @@ where
         if head_ptr.is_null() {
             return None;
         }
-        Some(unsafe { & *head_ptr })
+        Some(unsafe { &*head_ptr })
     }
 
     pub fn insert(&mut self, data: D) -> Result<()> {
@@ -128,12 +134,12 @@ where
         return Ok(());
     }
 
-    pub fn search(&self, data: D) -> Option<D> {
+    pub fn search(&self, key: &D::Key) -> Option<D> {
         let mut current_idx = self.head();
         while let Some(node) = current_idx {
-            if data == node.data {
+            if key == node.data.ordering_key() {
                 return Some(node.data);
-            } else if data < node.data {
+            } else if key < node.data.ordering_key() {
                 current_idx = node.left();
             } else {
                 current_idx = node.right();
@@ -164,7 +170,7 @@ where
                 }
             }
         }
-        
+
         let color = current.is_red();
 
         let moved_up = if current.left().is_none() | current.right().is_none() {
@@ -173,7 +179,9 @@ where
             Self::delete_complex(current)
         };
 
-        if let Some(node) = moved_up && color == BLACK {
+        if let Some(node) = moved_up
+            && color == BLACK
+        {
             Self::fixup_delete(&self.head, node);
         }
 
@@ -182,7 +190,7 @@ where
     }
 
     // Deletes a node with 0 or 1 children.
-    fn delete_simple<'a>(head: &'a Node<D>, node: &'a Node<D>) -> Option<&'a Node<D>> {
+    fn delete_simple<'b>(head: &'b Node<D>, node: &'b Node<D>) -> Option<&'b Node<D>> {
         let parent = match node.parent() {
             Some(parent) => parent,
             None => head,
@@ -194,7 +202,7 @@ where
             } else {
                 parent.set_right(left);
             }
-            return Some(left)
+            return Some(left);
         } else if let Some(right) = node.right() {
             right.set_parent(node);
             if parent.left_ptr() == node.as_mut_ptr() {
@@ -202,14 +210,14 @@ where
             } else {
                 parent.set_right(right);
             }
-            return Some(right)
+            return Some(right);
         } else {
             if parent.left_ptr() == node.as_mut_ptr() {
                 parent.set_left(ptr::null_mut());
             } else {
                 parent.set_right(ptr::null_mut());
             }
-            return None
+            return None;
         }
     }
 
@@ -227,7 +235,7 @@ where
                     None => {
                         current.set_left(node);
                         node.set_parent(current);
-                        return
+                        return;
                     }
                 }
             } else if node.data > current.data {
@@ -236,8 +244,8 @@ where
                     None => {
                         current.set_right(node);
                         node.set_parent(current);
-                        return
-                    },
+                        return;
+                    }
                 }
             } else {
                 panic!("Node already exists in the tree.");
@@ -246,7 +254,9 @@ where
     }
 
     fn rotate_left(head: &AtomicPtr<Node<D>>, node: &Node<D>) {
-        let right_child = node.right().expect("Right Child should always exist when rotating.");
+        let right_child = node
+            .right()
+            .expect("Right Child should always exist when rotating.");
         let parent_tmp = node.parent();
         node.set_right(right_child.left_ptr());
         if let Some(left) = right_child.left() {
@@ -312,19 +322,22 @@ where
         }
 
         // Case 2 is enforced by setting the parent to black. If the parent is red, the grandparent should exist.
-        let grandparent = parent.parent().expect("Parent is red, grandparent should exist");
+        let grandparent = parent
+            .parent()
+            .expect("Parent is red, grandparent should exist");
         let uncle = Node::sibling(parent);
-        
+
         // Case 3: Uncle is red, recolor parent, grandparent, uncle
-        if let Some(uncle) = uncle && uncle.is_red() {
+        if let Some(uncle) = uncle
+            && uncle.is_red()
+        {
             parent.set_color(BLACK);
             grandparent.set_color(RED);
             uncle.set_color(BLACK);
-            
+
             // Recursively fixup the grandparent
             Self::fixup_insert(head, grandparent);
         }
-
         // Parent is left child of grandparent
         else if parent.as_mut_ptr() == grandparent.left_ptr() {
             // Case 4a: uncle is black and node is left->right "inner child" of it's grandparent
@@ -414,7 +427,7 @@ where
         if node.is_null() {
             return None;
         }
-        Some(unsafe { & *node })
+        Some(unsafe { &*node })
     }
 
     /// Used when you don't care whether or not the node is null.
@@ -424,8 +437,7 @@ where
     }
 
     #[inline(always)]
-    fn set_right<N: Into<*mut Node<D>>>(&self, node: N)
-    {
+    fn set_right<N: Into<*mut Node<D>>>(&self, node: N) {
         self.right.store(node.into(), Ordering::SeqCst);
     }
 
@@ -435,7 +447,7 @@ where
         if node.is_null() {
             return None;
         }
-        Some(unsafe { & *node })
+        Some(unsafe { &*node })
     }
 
     fn left_ptr(&self) -> *mut Node<D> {
@@ -443,8 +455,7 @@ where
     }
 
     #[inline(always)]
-    fn set_left<N: Into<*mut Node<D>>>(&self, node: N)
-    {
+    fn set_left<N: Into<*mut Node<D>>>(&self, node: N) {
         self.left.store(node.into(), Ordering::SeqCst);
     }
 
@@ -479,7 +490,7 @@ where
     }
 }
 
-impl <D>core::fmt::Debug for Node<D>
+impl<D> core::fmt::Debug for Node<D>
 where
     D: PartialOrd + core::fmt::Debug,
 {
@@ -488,7 +499,7 @@ where
         write!(f, "Node {{ addr: {:?}, parent: {:12?}, left: {:12?}, right: {:12?}, color: {:?}, data: {:?} }}", self.as_mut_ptr(), self.parent_ptr(), self.left_ptr(), self.right_ptr(), color, self.data)
     }
 }
-impl <D>From<&Node<D>> for *mut Node<D>
+impl<D> From<&Node<D>> for *mut Node<D>
 where
     D: PartialOrd,
 {
@@ -500,36 +511,40 @@ where
 #[cfg(test)]
 mod tests {
     extern crate std;
-    use super::{Node, Rbt};
-    use core::{ptr::null_mut, sync::atomic::{AtomicPtr, Ordering}};
+    use super::{node_size, Node, Rbt};
+    use core::{
+        ptr::null_mut,
+        sync::atomic::{AtomicPtr, Ordering},
+    };
     use std::println;
 
     const RBT_MAX_SIZE: usize = 0x1000;
 
     #[test]
     fn simple_test() {
-            let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new();
-            assert!(rbt.insert(5).is_ok());
-            assert_eq!(rbt.storage.length, 1);
-            assert!(rbt.insert(3).is_ok());
-            assert!(rbt.insert(7).is_ok());
-            assert!(rbt.insert(2).is_ok());
-            assert!(rbt.insert(6).is_ok());
-            assert!(rbt.insert(8).is_ok());
-            assert!(rbt.insert(9).is_ok());
-            assert!(rbt.insert(10).is_ok());
-            assert_eq!(rbt.storage.length, 8);
+        let mut mem = [0; RBT_MAX_SIZE * node_size::<i32>()];
+        let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new(&mut mem);
+        assert!(rbt.insert(5).is_ok());
+        assert_eq!(rbt.storage.length, 1);
+        assert!(rbt.insert(3).is_ok());
+        assert!(rbt.insert(7).is_ok());
+        assert!(rbt.insert(2).is_ok());
+        assert!(rbt.insert(6).is_ok());
+        assert!(rbt.insert(8).is_ok());
+        assert!(rbt.insert(9).is_ok());
+        assert!(rbt.insert(10).is_ok());
+        assert_eq!(rbt.storage.length, 8);
 
-            let mut values = std::vec::Vec::new();
-            rbt.dfs(rbt.head(), &mut values);
-            println!("{:?}", values);
+        let mut values = std::vec::Vec::new();
+        rbt.dfs(rbt.head(), &mut values);
+        println!("{:?}", values);
 
-            for (initialized, node) in rbt.storage.data.iter() {
-                if *initialized {
-                    println!("{:?}", unsafe { node.assume_init_ref() });
-                }
+        for (initialized, node) in rbt.storage.data.iter() {
+            if *initialized {
+                println!("{:?}", node);
             }
         }
+    }
 
     #[test]
     fn test_case_3() {
@@ -542,15 +557,16 @@ mod tests {
                       \                       \
                       [81R]                  [81R]
         */
-        let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new();
+        let mut mem = [0; RBT_MAX_SIZE * node_size::<i32>()];
+        let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new(&mut mem);
         rbt.insert(17).unwrap();
-        
+
         // Head should be black
         {
             let head = rbt.head().unwrap();
             assert!(head.is_black());
         }
-        
+
         // Insert a node to the right, should be red
         rbt.insert(19).unwrap();
         {
@@ -590,7 +606,7 @@ mod tests {
             assert!(right_r_r.is_red());
         }
     }
-    
+
     #[test]
     fn test_case_4() {
         /* Parent Node is red, uncle node is black, inserted node is Inner
@@ -603,7 +619,8 @@ mod tests {
                       /   \
                     [19R] [75R]
         */
-        let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new();
+        let mut mem = [0; RBT_MAX_SIZE * node_size::<i32>()];
+        let mut rbt: Rbt<i32, RBT_MAX_SIZE> = Rbt::new(&mut mem);
         rbt.insert(17).unwrap();
         rbt.insert(9).unwrap();
         rbt.insert(19).unwrap();
@@ -636,18 +653,17 @@ mod tests {
         let right_r = right.right().unwrap();
         assert!(right_r.is_red());
         assert_eq!(right_r.data, 75);
-
     }
 
     #[test]
     fn test_rotate_right() {
         /* Verifies that the rotate right function works as expected.
-              [50]              [75]
-              /  \              /  \
-            [10][75]    <--   [50][85]
-                /  \          /  \
-              [70][85]      [10][70]
-         */
+             [50]              [75]
+             /  \              /  \
+           [10][75]    <--   [50][85]
+               /  \          /  \
+             [70][85]      [10][70]
+        */
         let node = Node::new(75);
         let left = Node::new(50);
         let right = Node::new(85);
@@ -666,12 +682,12 @@ mod tests {
         let head = AtomicPtr::<Node<i32>>::default();
 
         Rbt::<i32, RBT_MAX_SIZE>::rotate_right(&head, &node);
-        
+
         // Check left[50] <-> left_l[10] connection
         assert_eq!(left.left().unwrap().as_mut_ptr(), left_l.as_mut_ptr());
         assert_eq!(left_l.parent().unwrap().as_mut_ptr(), left.as_mut_ptr());
 
-        // check left[50] <-> left_r[70] connection 
+        // check left[50] <-> left_r[70] connection
         assert_eq!(left.right().unwrap().as_mut_ptr(), node.as_mut_ptr());
         assert_eq!(node.parent().unwrap().as_mut_ptr(), left.as_mut_ptr());
 
@@ -699,12 +715,12 @@ mod tests {
     #[test]
     fn test_rotate_left() {
         /* Verifies that the rotate left function works as expected.
-              [50]              [75]
-              /  \              /  \
-            [10][75]    -->   [50][85]
-                /  \          /  \
-              [70][85]      [10][70]
-         */
+             [50]              [75]
+             /  \              /  \
+           [10][75]    -->   [50][85]
+               /  \          /  \
+             [70][85]      [10][70]
+        */
         let node = Node::new(50);
         let left = Node::new(10);
         let right = Node::new(75);
@@ -739,15 +755,15 @@ mod tests {
         // Check node[50] <-right-> right_l[70] connection
         assert_eq!(node.right().unwrap().as_mut_ptr(), right_l.as_mut_ptr());
         assert_eq!(right_l.parent().unwrap().as_mut_ptr(), node.as_mut_ptr());
-        
+
         // Check left[10] has no children
         assert!(left.left().is_none());
         assert!(left.right().is_none());
-        
+
         // Check right_r[85] has no children
         assert!(right_r.left().is_none());
         assert!(right_r.right().is_none());
-        
+
         // Check right_l[70] has no children
         assert!(right_l.left().is_none());
         assert!(right_l.right().is_none());
@@ -755,17 +771,18 @@ mod tests {
 
     #[test]
     fn test_delete_from_storage() {
-        let mut rbt = Rbt::<i32, 10>::new();
+        let mut mem = [0; RBT_MAX_SIZE * node_size::<i32>()];
+        let mut rbt = Rbt::<i32, 10>::new(&mut mem);
         rbt.insert(5).unwrap();
         rbt.insert(3).unwrap();
         assert_eq!(rbt.storage.len(), 2);
-        assert_eq!(rbt.storage.data.iter().filter(|(i, _)|{*i}).count(), 2);
+        assert_eq!(rbt.storage.data.iter().filter(|(i, _)| { *i }).count(), 2);
         rbt.delete(5).unwrap();
         assert_eq!(rbt.storage.len(), 1);
-        assert_eq!(rbt.storage.data.iter().filter(|(i, _)|{*i}).count(), 1);
+        assert_eq!(rbt.storage.data.iter().filter(|(i, _)| { *i }).count(), 1);
         rbt.delete(3).unwrap();
         assert_eq!(rbt.storage.len(), 0);
-        assert_eq!(rbt.storage.data.iter().filter(|(i, _)|{*i}).count(), 0);
+        assert_eq!(rbt.storage.data.iter().filter(|(i, _)| { *i }).count(), 0);
     }
 
     #[test]
@@ -785,7 +802,7 @@ mod tests {
         left.set_parent(&node);
         left.set_left(&left_l);
         left_l.set_parent(&left);
-        
+
         // Delete a node with a single child.
         Rbt::<i32, RBT_MAX_SIZE>::delete_simple(&node, &left);
         assert_eq!(node.left().unwrap().as_mut_ptr(), left_l.as_mut_ptr());
@@ -800,7 +817,7 @@ mod tests {
 #[cfg(test)]
 mod fuzz_tests {
     extern crate std;
-    use super::{Node, Rbt};
+    use super::{node_size, Node, Rbt};
     use core::sync::atomic::AtomicPtr;
     use rand::seq::SliceRandom;
     use rand::Rng;
@@ -812,7 +829,8 @@ mod fuzz_tests {
     #[test]
     fn fuzz_insert() {
         for _ in 0..100 {
-            let mut rbt: Rbt<usize, RBT_MAX_SIZE> = Rbt::new();
+            let mut mem = [0; RBT_MAX_SIZE * node_size::<u32>()];
+            let mut rbt: Rbt<u32, RBT_MAX_SIZE> = Rbt::new(&mut mem);
             let mut rng = rand::thread_rng();
             let min = 1;
             let max = 100_000;
@@ -842,7 +860,8 @@ mod fuzz_tests {
 
     #[test]
     fn fuzz_delete() {
-        let mut rbt: Rbt<usize, RBT_MAX_SIZE> = Rbt::new();
+        let mut mem = [0; RBT_MAX_SIZE * node_size::<u32>()];
+        let mut rbt: Rbt<u32, RBT_MAX_SIZE> = Rbt::new(&mut mem);
         let mut rng = rand::thread_rng();
         let min = 1;
         let max = 100_000;
@@ -855,7 +874,7 @@ mod fuzz_tests {
 
         let mut random_numbers: Vec<_> = random_numbers.into_iter().collect();
         random_numbers.shuffle(&mut rng);
-        
+
         assert_eq!(random_numbers.len(), RBT_MAX_SIZE);
         for num in random_numbers.iter() {
             assert!(rbt.insert(*num).is_ok());
@@ -867,10 +886,11 @@ mod fuzz_tests {
             assert!(rbt.delete(num).is_ok());
         }
     }
-    
+
     #[test]
     fn fuzz_search() {
-        let mut bst: Rbt<usize, RBT_MAX_SIZE> = Rbt::new();
+        let mut mem = [0; RBT_MAX_SIZE * node_size::<u32>()];
+        let mut bst: Rbt<u32, RBT_MAX_SIZE> = Rbt::new(&mut mem);
         let mut rng = rand::thread_rng();
         let min = 1;
         let max = 100_000;
@@ -892,10 +912,9 @@ mod fuzz_tests {
         // Search for numbers that exist in the tree
         for _ in 0..100_000 {
             let num = random_numbers.choose(&mut rng).unwrap();
-            assert!(bst.search(*num).is_some());
+            assert!(bst.search(num).is_some());
         }
 
-        
         // Search for numbers that do not exist in the tree
         for _ in 0..100_000 {
             let to_search = rng.gen_bool(0.5);
@@ -904,7 +923,7 @@ mod fuzz_tests {
             } else {
                 rng.gen_range(max + 1..=max + 50_000)
             };
-            assert!(bst.search(random_number).is_none());
+            assert!(bst.search(&random_number).is_none());
         }
     }
 }

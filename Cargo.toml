@@ -13,11 +13,32 @@ src = "0.0.6"
 [dev-dependencies]
 rand = "0.8.5"
 criterion = "0.5.1"
+uint = "0.9.5"
 
 [[bench]]
 name = "bench_insert"
 harness = false
 
+# [[bench]]
+# name = "bench_delete"
+# harness = false
+
+[[bench]]
+name = "bench_search"
+harness = false
+
+[[bench]]
+name = "bench_search_384"
+harness = false
+
+[[bench]]
+name = "bench_delete_384"
+harness = false
+
 [[bench]]
 name = "bench_delete"
 harness = false
+
+# [[bench]]
+# name = "bench"
+# harness = false
